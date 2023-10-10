@@ -1,8 +1,4 @@
-# llm-server
-Serve LLMs on NCSA hardware. Support the best FOSS models, and the long tail on HuggingFace Hub.
-
-## Usage
-
+# api.kastan.ai - LLMs for all
 :star:️ https://api.kastan.ai/ :star:
 
 _Free & unbelievably easy LLaMA-2 inference for everyone at NCSA!_
@@ -13,6 +9,8 @@ _Free & unbelievably easy LLaMA-2 inference for everyone at NCSA!_
 * It works with LangChain :parrot::link:
 
 Beautiful implementation detail: it’s a perfect clone of the OpenAI API, making my version a drop in replacement for any openAI calls. Say goodbye to huge OpenAI bills!:moneybag:
+
+## Usage
 
 :scroll: I wrote [beautiful usage docs & examples here](https://kastanday.notion.site/LLM-Serving-on-prem-OpenAI-Clone-bb06028266d842b0872465f552684177) :eyes: It literally couldn’t be simpler to use :innocent:
 
