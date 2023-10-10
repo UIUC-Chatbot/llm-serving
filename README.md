@@ -8,7 +8,7 @@ _Free & unbelievably easy LLaMA-2 inference for everyone at NCSA!_
 * It’s running on NCSA Center of AI Innovation GPUs, and is fully private & secure thanks to https connections via Zero Trust CloudFlare Tunnels.
 * It works with LangChain :parrot::link:
 
-Beautiful implementation detail: it’s a perfect clone of the OpenAI API, making my version a drop in replacement for any openAI calls. Say goodbye to huge OpenAI bills!:moneybag:
+Beautiful implementation detail: it’s a perfect clone of the OpenAI API, making my version a **drop-in replacement for OpenAI calls** (except embeddings). Say goodbye to huge OpenAI bills!:moneybag:
 
 ## Usage
 
