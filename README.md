@@ -42,9 +42,25 @@ curl https://api.kastan.ai/v1/completions \
     -H 'Content-Type: application/json' \
     -d '{ "prompt": "What is the capital of France?", "echo": true }'
 ```
-## UX Design Goals
-1. 🧠⚡️ Flawless API support for the best LLM of the day. An exact clone of the OpenAI API, making it a drop-in replacement.
-2. 🤗  Support for 100% of the models on HuggingFace Hub, some will be easier to use than others.
+
+<div style="border: 2px solid #f1f1f1; padding: 10px; margin: 10px; border-radius: 10px; background-color: #f9f9f9;">
+
+## UX Design Goals 🎯
+
+1. <div style="background-color: #fff9db; border: 1px solid #ffe600; padding: 10px; margin: 10px 0; border-radius: 5px;">
+    🧠⚡️ <strong>Flawless API support for the best LLM of the day.</strong>
+    
+    An exact clone of the OpenAI API, making it a drop-in replacement.
+   </div>
+
+2. <div style="background-color: #dbfff5; border: 1px solid #00ffe6; padding: 10px; margin: 10px 0; border-radius: 5px;">
+    🤗 <strong>Support for 100% of the models on HuggingFace Hub.</strong>
+    
+    Some will be easier to use than others.
+   </div>
+
+</div>
+
 
 ### Towards 100% Coverage of HuggingFace Hub
 ⭐️ S-Tier: For the best text LLM of the day, currently LLaMA-2 or Mistral, we offer persistant, ultra-low-latency inference with customized, fused, cuda kernels. This is suitable to build other applications on top of. Any app can now easily and reliably benefit from intelligence.
