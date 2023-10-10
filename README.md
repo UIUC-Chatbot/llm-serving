@@ -43,19 +43,28 @@ curl https://api.kastan.ai/v1/completions \
     -d '{ "prompt": "What is the capital of France?", "echo": true }'
 ```
 ## UX Design Goals
-1. Flawless API support for the best LLM of the day. An exact clone of the OpenAI API, making it a drop-in replacement.
-2. Support for 100% of the models on HuggingFace Hub, some will be easier to use than others.
+1. 🧠⚡️ Flawless API support for the best LLM of the day. An exact clone of the OpenAI API, making it a drop-in replacement.
+2. 🤗  Support for 100% of the models on HuggingFace Hub, some will be easier to use than others.
 
 ### Towards 100% Coverage of HuggingFace Hub
 ⭐️ S-Tier: For the best text LLM of the day, currently LLaMA-2 or Mistral, we offer persistant, ultra-low-latency inference with customized, fused, cuda kernels. This is suitable to build other applications on top of. Any app can now easily and reliably benefit from intelligence.
 
-🥇 A-Tier: If you want a particular LLM, in the list of popular supported ones, that's fine too. They all have optimized inference cuda kernels.
+🥇 A-Tier: If you want a particular LLM, in [the list of popular supported ones](https://vllm.readthedocs.io/en/latest/models/supported_models.html), that's fine too. They all have optimized inference cuda kernels.
+
+👍 B-Tier: Most models on the HuggingFace Hub, all those that support [`AutoModel()`](https://huggingface.co/transformers/v3.0.2/model_doc/auto.html) and/or [`pipeline()`](https://huggingface.co/docs/transformers/v4.34.0/en/main_classes/pipelines#transformers.pipeline). The only downside here is cold starts, download the model & loading it onto a GPU. 
+
+✨ C-Tier: Models that require custom pre/post-processing code, just supply your own `load()` and `run()` functions, typically copy-pasted from the Readme of a HuggingFace model card. Docs to come.
+
+❌ F-Tier: The current status quo: every researcher doing this independently. It's slow, painful and usually extremely compute-wasteful.
 
 <img width="1713" alt="llm_sever_priorities" src="https://github.com/KastanDay/llm-server/assets/13607221/14c440db-8cff-4b00-9338-47bf839e768e">
 
-
 ## Technical Design
 
+Limitations with WIP solutions: 
+* Cuda-OOM errors: If your model doesn't fit on our `4xA40 (48 GB)` server we return an error. Coming soon, we should fallback to accelerate ZeRO stage-3 (CPU/Disk offload). And/or allow a flag for quantization, `load_in_8bit=True` or `load_in_4bit=True`.
+* Multi-node support. Currently it's only designed to loadbalance within a single node, soon we should use Ray Serve to support arbitrary hetrogeneous nodes.
+* Advanced batching -- when the queue contains separate requests for the same model, batch them and run all jobs requesting that model before moving onto the next model (with a max of 15-20 minutes with any one model in memory, if we have other jobs waiting in the queue. This should balance efficiency, i.e. batching, with fairness, i.e. FIFO queuing).
 
 <img width="1666" alt="api kastan ai_routing_design" src="https://github.com/KastanDay/llm-server/assets/13607221/038c129f-dcad-4d84-9b4d-a7fd00148555">
 
