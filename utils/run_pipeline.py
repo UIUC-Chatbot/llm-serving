@@ -46,14 +46,3 @@ if __name__ == "__main__":
   task_filter = "text-generation"
   pipeline_kwargs = {'max_new_tokens': 256, 'do_sample': True, 'temperature': 0.7, 'top_k': 50, 'top_p': 0.95}
   print(run_automodel(prompt, model, task_filter, **pipeline_kwargs))
-
-
-
-if __name__ == "__main__":
-  prompt = "How many helicopters can a human eat in one sitting?"
-  model = "HuggingFaceH4/zephyr-7b-alpha"
-  task_filter = "text-generation"
-  pipeline_kwargs = {'max_new_tokens': 256, 'do_sample': True, 'temperature': 0.7, 'top_k': 50, 'top_p': 0.95}
-  print(run_automodel(prompt, model, task_filter, **pipeline_kwargs))
-
-
