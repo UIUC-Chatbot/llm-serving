@@ -6,7 +6,7 @@ def list_automodels(task_filter: Union[str,List[str]], hf_token: str = '' ):
   '''These can be run with just the model name and a prompt, no other inputs required.
   All models & tasks publiclly on the Hub (as of October, 2023)
   Total models on Hub = 356,609
-  Ttotal models with pipeline tags = 190,650 (53.5%)
+  Total models with pipeline tags = 190,650 (53.5%)
   {
     'text-classification': 33353,
     'reinforcement-learning': 29993,
