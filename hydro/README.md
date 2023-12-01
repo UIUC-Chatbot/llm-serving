@@ -37,4 +37,4 @@ curl -X POST -H "Content-Type: application/json" -d '{"prompt":"Once upon a time
 
 ## Note
 
-This server is set up for demonstration purposes and is not intended for production use. For a production environment.
+This server is set up for demonstration purposes and is not intended for production use.
