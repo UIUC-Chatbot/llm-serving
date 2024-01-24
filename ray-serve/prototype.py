@@ -1,10 +1,12 @@
 import argparse
+import asyncio
 import logging
 from logging import Logger
 import ray
 from ray import serve
 from ray.serve.handle import DeploymentHandle
 from starlette.requests import Request
+import time
 from vllm import LLM, SamplingParams
 
 
@@ -52,7 +54,7 @@ class _ModelInfo:
     def __init__(self, app_name: str) -> None:
         self.app_name: str = app_name
         self.used_gpus: int = 0
-        self.last_served_request: int = -1
+        self.last_served_time: float = time.time()
 
 
 @serve.deployment
@@ -70,6 +72,7 @@ class ModelPool:
         self._logger: Logger = logging.getLogger("ray.serve")
         self._num_gpus: int = num_gpus
         self._model_pool: dict[str, _ModelInfo] = {}
+        self._lock: asyncio.Lock = asyncio.Lock()
         self._num_served_models: int = 0
         self._num_served_requests: int = 0
 
@@ -84,25 +87,35 @@ class ModelPool:
 
     def _get_least_recently_served_model(self) -> str:
         active_models = {k: v for k, v in self._model_pool.items() if v.used_gpus > 0}
-        least_recently_served_model = min(
-            active_models, key=lambda k: active_models[k].last_served_request
-        )
-        return least_recently_served_model
+        return min(active_models, key=lambda k: active_models[k].last_served_time)
 
-    def _switch_model(self, model_in: str, model_out: str = None) -> None:
+    async def _switch_model(self, model_in: str, model_out: str = None) -> None:
         """
         Assume both model_in and model_out are already registered in the model pool except when model_out is None. It's the caller's responsibility to ensure the availablity of GPU resources. This function does not verify if model_out is currently utilizing GPU resource,  nor does it check for the availablity of GPUs.
         """
-        if model_out is not None:
-            serve.delete(self._model_pool[model_out].app_name)
-            self._model_pool[model_out].used_gpus = 0
-        new_model = VLLM_Model.bind(model_name=model_in)
-        serve.run(
-            new_model,
-            name=self._model_pool[model_in].app_name,
-            route_prefix=f"/{self._model_pool[model_in].app_name}",
-        )
-        self._model_pool[model_in].used_gpus = 1
+        async with self._lock:
+            if model_out is not None:
+                await asyncio.to_thread(
+                    serve.delete, name=self._model_pool[model_out].app_name
+                )
+                self._model_pool[model_out].used_gpus = 0
+            new_model = VLLM_Model.bind(model_name=model_in)
+            await asyncio.to_thread(
+                serve.run,
+                target=new_model,
+                name=self._model_pool[model_in].app_name,
+                route_prefix=f"/{self._model_pool[model_in].app_name}",
+            )
+            self._model_pool[model_in].used_gpus = 1
+
+    async def _maybe_sleep(self, model_name: str) -> None:
+        """
+        Sleep for some time if the model has served requests in recent time.
+        """
+        current_time: float = time.time()
+        last_request_time: float = self._model_pool[model_name].last_served_time
+        if current_time - last_request_time < 30:
+            await asyncio.sleep(5)
 
     async def _call_model(self, model_name: str, prompt: list[str] | str) -> str:
         """
@@ -112,16 +125,15 @@ class ModelPool:
             model_info = _ModelInfo(f"model-{self._num_served_models}")
             self._num_served_models += 1
             self._model_pool[model_name] = model_info
-        self._model_pool[model_name].last_served_request = self._num_served_requests
+        self._model_pool[model_name].last_served_time = time.time()
         self._num_served_requests += 1
         if self._model_pool[model_name].used_gpus == 0:
             if self._has_available_gpu():
-                self._switch_model(model_in=model_name, model_out=None)
+                await self._switch_model(model_in=model_name, model_out=None)
             else:
-                self._switch_model(
-                    model_in=model_name,
-                    model_out=self._get_least_recently_served_model(),
-                )
+                model_out: str = self._get_least_recently_served_model()
+                await self._maybe_sleep(model_out)
+                await self._switch_model(model_in=model_name, model_out=model_out)
         model_handle: DeploymentHandle = serve.get_app_handle(
             self._model_pool[model_name].app_name
         )
