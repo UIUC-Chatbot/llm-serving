@@ -15,7 +15,7 @@ applications:
   route_prefix: /llm
   import_path: model_pool:app_builder
   args:
-    config_file_path: llm_config.yaml
+    config_file_path: llm_config_default.yaml
     num_gpus: 1
   runtime_env: {}
   deployments:
