@@ -1,16 +1,22 @@
+from ingress import app
 from pydantic import BaseModel
 from ray import serve
 from ray.serve import Application
 from ray.serve.handle import DeploymentHandle
-from starlette.requests import Request
 import time
 from typing import Any
 from vllm import LLM, SamplingParams
 
 
+class UserRequest(BaseModel):
+    prompt: str
+    load_required: bool = False
+
+
 @serve.deployment(
     name="ModelApp",
 )
+@serve.ingress(app)
 class ModelApp:
     """
     A thin wrapper class for the model to be served.
@@ -24,11 +30,11 @@ class ModelApp:
         self._last_served_time = time.time()
         self._sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 
-    async def __call__(self, request: Request) -> str:
-        input_msg = await request.json()
+    @app.post("/")
+    async def call(self, request: UserRequest) -> str | list[str]:
         if self._is_active:
             self._last_served_time = time.time()
-            prompt: list[str] | str = input_msg["prompt"]
+            prompt: list[str] | str = request.prompt
             if type(prompt) == str:
                 prompt: list[str] = [prompt]
             outputs = []
@@ -41,8 +47,8 @@ class ModelApp:
                 )
             return outputs
         else:
-            should_load = input_msg.get("should_load", False)
-            if should_load:
+            load_required = request.load_required
+            if load_required:
                 await self._controller_app.handle_unavailable_model.remote(
                     self._model_name
                 )

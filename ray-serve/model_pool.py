@@ -1,5 +1,6 @@
 import asyncio
 from enum import Enum
+import fastapi
 from logging import getLogger, Logger
 import os
 from pydantic import BaseModel
@@ -20,6 +21,8 @@ Architecture:
 
     When a ModelApp is inactive, it might request the ModelController to load the model. The ModelController might select a victim model to evict from GPU and load the requested model.
 """
+
+main_app = fastapi.FastAPI()
 
 
 class _AppAction(Enum):
@@ -43,7 +46,14 @@ class _ModelContext:
         self.used_gpus: int = 0
 
 
+class UserRequest(BaseModel):
+    mode: str
+    model_name: str
+    file_path: str | None = None
+
+
 @serve.deployment
+@serve.ingress(main_app)
 class ModelController:
     def __init__(self, config_file_path: str, num_gpus: int) -> None:
         with open(config_file_path, "r") as file:
@@ -162,22 +172,22 @@ class ModelController:
             else:
                 return f"Model {model_name} not found."
 
-    async def __call__(self, request: Request) -> str:
+    @main_app.post("/")
+    async def call(self, request: UserRequest) -> str:
         """
         The entrypoint of the ModelController. The input should be in json format, containing the following fields:
             "mode": "get", "delete", "dump_config"
             "model_name": the model name as recognized by VLLM or HuggingFace
         """
-        input_msg = await request.json()
-        mode: str = input_msg["mode"]
-        model_name: str = input_msg["model_name"]
+        mode: str = request.mode
+        model_name: str = request.model_name
 
         if mode == "get":
             return await self._get_or_register_model(model_name)
         elif mode == "delete":
             return await self._delete_model(model_name)
         elif mode == "dump_config":
-            file_path: str = input_msg["file_path"]
+            file_path: str = request.file_path
             with open(file_path, "w") as file:
                 yaml.dump(self._config, file, sort_keys=False)
             return f"Config dumped to {file_path}"

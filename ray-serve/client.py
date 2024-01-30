@@ -29,7 +29,7 @@ elif args.mode == 1:
     print(f"Sending prompt to model {args.model_name}")
     while True:
         data = input("Type something here ...\n")
-        prompt = {"prompt": data, "should_load": True}
+        prompt = {"prompt": data, "load_required": True}
         response = requests.post(f"http://{args.endpoint}", json=prompt)
         output_text = response.text
         print(output_text)
