@@ -1,5 +1,4 @@
 import argparse
-import asyncio
 import codecs
 import json
 import time
@@ -14,6 +13,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse, Response
 
+from model_app import ModelAppInterface, ModelAppArgs
 from ray import serve
 
 from vllm.engine.arg_utils import AsyncEngineArgs
@@ -46,7 +46,7 @@ from vllm.transformers_utils.tokenizer import get_tokenizer
 from vllm.utils import random_uuid
 
 
-def parse_args():
+def parse_args(model_name: str):
     parser = argparse.ArgumentParser(
         description="vLLM OpenAI-Compatible RESTful API server."
     )
@@ -100,38 +100,52 @@ def parse_args():
     )
 
     parser = AsyncEngineArgs.add_cli_args(parser)
-    return parser.parse_args()
+    # Important! Do not pass values from command line! This conflicts with Ray for whatever reason.
+    # Pass values in the script and save you the headache.
+    return parser.parse_args(["--served-model-name", model_name])
 
 
-args = parse_args()
 app = fastapi.FastAPI()
 app.add_middleware(MetricsMiddleware)  # Trace HTTP server metrics
 app.add_route("/metrics", metrics)  # Exposes HTTP metrics
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=args.allowed_origins,
-    allow_credentials=args.allow_credentials,
-    allow_methods=args.allowed_methods,
-    allow_headers=args.allowed_headers,
-)
 
 
-@serve.deployment(ray_actor_options={"num_gpus": 1})
+@serve.deployment(name="ModelApp")
 @serve.ingress(app)
-class OpenAIWrapper:
-    def __init__(self) -> None:
-        self.engine_args = AsyncEngineArgs.from_cli_args(args)
-        self.engine = AsyncLLMEngine.from_engine_args(self.engine_args)
+class ModelApp(ModelAppInterface):
+    def __init__(self, model_name: str, controller: str) -> None:
+        self.args = parse_args(model_name)
+
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=self.args.allowed_origins,
+            allow_credentials=self.args.allow_credentials,
+            allow_methods=self.args.allowed_methods,
+            allow_headers=self.args.allowed_headers,
+        )
+
         self.logger = init_logger(__name__)
-        self.response_role = args.response_role
-        if args.served_model_name is not None:
-            self.served_model = args.served_model_name
-        else:
-            self.served_model = args.model
+        self.served_model = self.args.served_model_name
+        self.engine = None
+        self.engine_args = None
+        self.response_role = None
         self.max_model_len = None
         self.tokenizer = None
+        self._is_active: bool = False
+        self._is_loaded: bool = False
+        self._controller_app = serve.get_app_handle(controller)
+        self._last_served_time = time.time()
+        self._unhandled_requests = 0
 
-    async def as_init(self):
+    async def _real_init(self) -> None:
+        """
+        Some VLLM initialization code is async, so we need to call it here. If `reconfigure` were also async, we could call it there, but it's not.
+        This function is called in check_model function if the model is not loaded.
+        """
+        self.args = parse_args(self.served_model)
+        self.response_role = self.args.response_role
+        self.engine_args = AsyncEngineArgs.from_cli_args(self.args)
+        self.engine = AsyncLLMEngine.from_engine_args(self.engine_args)
         engine_model_config = await self.engine.get_model_config()
         self.max_model_len = engine_model_config.max_model_len
         self.tokenizer = get_tokenizer(
@@ -139,9 +153,21 @@ class OpenAIWrapper:
             tokenizer_mode=engine_model_config.tokenizer_mode,
             trust_remote_code=engine_model_config.trust_remote_code,
         )
-
-        self.load_chat_template(args, self.tokenizer)
+        self.load_chat_template(self.args, self.tokenizer)
         add_global_metrics_labels(model_name=self.engine_args.model)
+        self._is_loaded = True
+
+    def reconfigure(self, config) -> None:
+        """
+        This method is called when the model is being reconfigured via "user_config" in the config yaml file. Refer to Ray documentation for more details.
+        """
+        self._is_active: bool = config["is_active"]
+
+    def collect_eviction_defense_metrics(self) -> dict:
+        """
+        This method is called when the ModelController is trying to evict a model from GPU. It returns metrics that justify the model's continued operation on GPU.
+        """
+        return {"last_served_time": self._last_served_time}
 
     def create_error_response(
         self, status_code: HTTPStatus, message: str
@@ -175,12 +201,29 @@ class OpenAIWrapper:
         return self.create_error_response(HTTPStatus.BAD_REQUEST, str(exc))
 
     async def check_model(self, request) -> Optional[JSONResponse]:
-        if request.model == self.served_model:
-            return
-        ret = self.create_error_response(
-            HTTPStatus.NOT_FOUND,
-            f"The model `{request.model}` does not exist.",
-        )
+        self._last_served_time = time.time()
+        if self._is_active:
+            if not self._is_loaded:
+                await self._real_init()
+            if request.model == self.served_model:
+                return
+            ret = self.create_error_response(
+                HTTPStatus.NOT_FOUND,
+                f"The model `{request.model}` does not exist.",
+            )
+        else:
+            self._unhandled_requests += 1
+            if self._unhandled_requests == 3:
+                await self._controller_app.handle_unavailable_model.remote(
+                    self.served_model
+                )
+                ret = self.create_error_response(
+                    HTTPStatus.SERVICE_UNAVAILABLE, "Service restoring."
+                )
+            else:
+                ret = self.create_error_response(
+                    HTTPStatus.SERVICE_UNAVAILABLE, "Service temporarily unavailable."
+                )
         return ret
 
     async def check_length(
@@ -789,5 +832,5 @@ class OpenAIWrapper:
         return response
 
 
-new_app = serve.run(OpenAIWrapper.bind(), route_prefix="/test")
-new_app.as_init.remote()
+def app_builder(args: ModelAppArgs):
+    return ModelApp.bind(args.model_name, args.controller)

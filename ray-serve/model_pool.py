@@ -9,7 +9,6 @@ from ray.dashboard.modules.serve.sdk import ServeSubmissionClient
 from ray.serve import Application
 from ray.serve.handle import DeploymentHandle
 from ray.serve.schema import ServeDeploySchema
-from starlette.requests import Request
 import yaml
 
 """
@@ -17,12 +16,10 @@ Architecture:
 
     The ModelController is a Ray serve app that manages the model pool. It dynamically loads models on demand and performs model switching when necessary. It also handles model deletion requests.
 
-    Each individual model is wrapped in a ModelApp class and deployed as its own Ray Serve app.
+    Each individual model is wrapped in a ModelApp class and deployed as its own Ray Serve app. ModelApp is an abstract class, and the actual model implementation is specified by the model_type.
 
-    When a ModelApp is inactive, it might request the ModelController to load the model. The ModelController might select a victim model to evict from GPU and load the requested model.
+    When a ModelApp is inactive, users might request to load that model. The ModelApp sends a request to the ModelController to load the model. The ModelController might select a victim model to evict from GPU and load the requested model.
 """
-
-main_app = fastapi.FastAPI()
 
 
 class _AppAction(Enum):
@@ -36,20 +33,32 @@ class _DeploymentAction(Enum):
     DEACTIVATE = 2  # Deactivate a deployment
 
 
+class _ModelType(Enum):
+    VLLM_RAW = 1  # Raw VLLM model, created by llm = LLM(model="model_name")
+    VLLM_OPENAI = 2  # VLLM OpenAI-Compatible server
+
+
 class _ModelContext:
-    def __init__(self, app_name: str, model_name: str, route_prefix: str) -> None:
+    def __init__(
+        self, app_name: str, model_name: str, route_prefix: str, model_type: _ModelType
+    ) -> None:
         self.app_name: str = app_name
         self.app_handle: DeploymentHandle | None = None
         self.model_name: str = model_name
+        self.model_type: _ModelType = model_type
         self.route_prefix: str = route_prefix
-        self.wrapper_name: str = "ModelApp"  # The name of the deployment
+        self.wrapper_name: str = "ModelApp"  # The name of the model deployment
         self.used_gpus: int = 0
 
 
 class UserRequest(BaseModel):
     mode: str
     model_name: str
+    model_type: str
     file_path: str | None = None
+
+
+main_app = fastapi.FastAPI()
 
 
 @serve.deployment
@@ -57,7 +66,7 @@ class UserRequest(BaseModel):
 class ModelController:
     def __init__(self, config_file_path: str, num_gpus: int) -> None:
         with open(config_file_path, "r") as file:
-            self._config = yaml.safe_load(file)
+            self._config: dict = yaml.safe_load(file)
         self._lock: asyncio.Lock = asyncio.Lock()
         self._logger: Logger = getLogger("ray.serve")
         self._model_pool: dict[str, _ModelContext] = {}
@@ -81,8 +90,10 @@ class ModelController:
     ) -> None:
         """
         Ray uses config file (yaml) to dynamically update serve apps and deployments.
-        ModelController maintains a local copy of the config file, which is updated whenever a model is added, removed, activated, or deactivated.
+        ModelController maintains a local copy of the config file (self._config), which is updated whenever a model is added, removed, activated, or deactivated.
         ModelController sends the config file to the Ray dashboard service, which then updates the serve apps and deployments.
+
+        Refer to Ray documentation for more details about the format of the config files.
         """
         apps: list[dict] = self._config["applications"]
         if app_action == _AppAction.ADD:
@@ -94,11 +105,15 @@ class ModelController:
                 num_gpus = 0
                 is_active = False
                 model.used_gpus = 0
+            if model.model_type == _ModelType.VLLM_RAW:
+                import_path = "vllm_raw:app_builder"
+            elif model.model_type == _ModelType.VLLM_OPENAI:
+                import_path = "vllm_server.openai.vllm_openai:app_builder"
             apps.append(
                 {
                     "name": model.app_name,
                     "route_prefix": model.route_prefix,
-                    "import_path": "model_app:app_builder",
+                    "import_path": import_path,
                     "args": {
                         "model_name": model.model_name,
                         "controller": self._config["applications"][0]["name"],
@@ -144,7 +159,9 @@ class ModelController:
             f"Application updated.  App: {model.app_name}, Action: {app_action}{deploy_status}"
         )
 
-    async def _get_or_register_model(self, model_name: str) -> str:
+    async def _get_or_register_model(
+        self, model_name: str, model_type: _ModelType
+    ) -> str:
         """
         Return the route prefix of the requested model. Create a serve app for the model if it's not created yet.
         """
@@ -154,11 +171,14 @@ class ModelController:
                     app_name=model_name.replace("/", "---"),
                     model_name=model_name,
                     route_prefix=f"/model-{self._num_served_models}",
+                    model_type=model_type,
                 )
                 self._model_pool[model_name] = model_context
                 self._num_served_models += 1
                 self._update_app(_AppAction.ADD, model_context)
-            return self._model_pool[model_name].route_prefix
+            route = f"Route prefix: {self._model_pool[model_name].route_prefix}"
+            server_type = f"Server type: {model_type}"
+            return f"{route}, {server_type}"
 
     async def _delete_model(self, model_name: str) -> str:
         """
@@ -166,7 +186,10 @@ class ModelController:
         """
         async with self._lock:
             if model_name in self._model_pool:
-                self._update_app(_AppAction.REMOVE, self._model_pool[model_name])
+                self._update_app(
+                    _AppAction.REMOVE,
+                    self._model_pool[model_name],
+                )
                 self._model_pool.pop(model_name)
                 return f"Model {model_name} deleted."
             else:
@@ -175,15 +198,20 @@ class ModelController:
     @main_app.post("/")
     async def call(self, request: UserRequest) -> str:
         """
-        The entrypoint of the ModelController. The input should be in json format, containing the following fields:
-            "mode": "get", "delete", "dump_config"
-            "model_name": the model name as recognized by VLLM or HuggingFace
+        The entrypoint of the ModelController. The input should be conform to the UserRequest schema.
         """
         mode: str = request.mode
         model_name: str = request.model_name
 
         if mode == "get":
-            return await self._get_or_register_model(model_name)
+            model_type: str = request.model_type
+            if model_type == "vllm_raw":
+                model_type = _ModelType.VLLM_RAW
+            elif model_type == "vllm_openai":
+                model_type = _ModelType.VLLM_OPENAI
+            else:
+                return "Invalid model type. Aborting."
+            return await self._get_or_register_model(model_name, model_type)
         elif mode == "delete":
             return await self._delete_model(model_name)
         elif mode == "dump_config":
@@ -203,10 +231,21 @@ class ModelController:
         This function does not verify whether deactivating model_out actually releases GPU resources, nor does it check for the availability of any GPU.
         """
         if model_out is not None:
-            self._update_app(_AppAction.UPDATE, model_out, _DeploymentAction.DEACTIVATE)
-        self._update_app(_AppAction.UPDATE, model_in, _DeploymentAction.ACTIVATE)
+            self._update_app(
+                _AppAction.UPDATE,
+                model_out,
+                _DeploymentAction.DEACTIVATE,
+            )
+        self._update_app(
+            _AppAction.UPDATE,
+            model_in,
+            _DeploymentAction.ACTIVATE,
+        )
 
     async def _select_victim(self, initiator: _ModelContext) -> _ModelContext:
+        """
+        The initiator model has requested to load itself into GPU. However, there is no available GPU. This function selects a victim model to evict from GPU.
+        """
         candidates = []
         for model in self._model_pool.values():
             if model.app_name == initiator.app_name:
@@ -217,13 +256,14 @@ class ModelController:
                 model.app_handle = serve.get_app_handle(model.app_name)
             metrics = await model.app_handle.collect_eviction_defense_metrics.remote()
             candidates.append((model, metrics["last_served_time"]))
+        # Remove the least recently used model
         victim = min(candidates, key=lambda x: x[1])[0]
         # TODO: do we need to wait here for a while?
         return victim
 
     async def handle_unavailable_model(self, model_name: str) -> None:
         """
-        This function is called by a ModelApp that fails to load a model.
+        This function is called by an inactive ModelApp who wants to load itself into GPU.
         """
         async with self._lock:
             model = self._model_pool[model_name]
