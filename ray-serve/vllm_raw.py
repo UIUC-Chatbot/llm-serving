@@ -24,11 +24,12 @@ class ModelApp(ModelAppInterface):
     A thin wrapper class for the model to be served.
     """
 
-    def __init__(self, model_name: str, controller: str) -> None:
+    def __init__(self, model_name: str, controller: str, gpus_per_replica: int) -> None:
         self._controller_app: DeploymentHandle = serve.get_app_handle(controller)
         self._is_active: bool = False
         self._model: LLM | None = None
         self._model_name: str = model_name
+        self._gpus_per_replica: int = gpus_per_replica
         self._last_served_time = time.time()
         self._sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 
@@ -64,7 +65,9 @@ class ModelApp(ModelAppInterface):
         """
         self._is_active: bool = config["is_active"]
         if self._is_active:
-            self._model = LLM(model=self._model_name)
+            self._model = LLM(
+                model=self._model_name, tensor_parallel_size=self._gpus_per_replica
+            )
         else:
             self._model = None
 
@@ -76,4 +79,4 @@ class ModelApp(ModelAppInterface):
 
 
 def app_builder(args: ModelAppArgs) -> Application:
-    return ModelApp.bind(args.model_name, args.controller)
+    return ModelApp.bind(args.model_name, args.controller, args.gpus_per_replica)

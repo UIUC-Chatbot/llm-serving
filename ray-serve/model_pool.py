@@ -14,11 +14,16 @@ import yaml
 """
 Architecture:
 
-    The ModelController is a Ray serve app that manages the model pool. It dynamically loads models on demand and performs model switching when necessary. It also handles model deletion requests.
+    The ModelController is a Ray serve app that manages the model pool. It dynamically loads models
+    on demand and performs model switching when necessary. It also handles model deletion requests.
 
-    Each individual model is wrapped in a ModelApp class and deployed as its own Ray Serve app. ModelApp is an abstract class, and the actual model implementation is specified by the model_type.
+    Each individual model is wrapped in a ModelApp class and deployed as its own Ray Serve app.
+    ModelApp is an abstract class, and the actual model implementation is specified by the
+    model_type.
 
-    When a ModelApp is inactive, users might request to load that model. The ModelApp sends a request to the ModelController to load the model. The ModelController might select a victim model to evict from GPU and load the requested model.
+    When a ModelApp is inactive, users might request to load that model. The ModelApp sends a
+    request to the ModelController to load the model. The ModelController might select a victim
+    model to evict from GPU and load the requested model.
 """
 
 
@@ -40,7 +45,12 @@ class _ModelType(Enum):
 
 class _ModelContext:
     def __init__(
-        self, app_name: str, model_name: str, route_prefix: str, model_type: _ModelType
+        self,
+        app_name: str,
+        model_name: str,
+        route_prefix: str,
+        model_type: _ModelType,
+        gpus_per_replica: int,
     ) -> None:
         self.app_name: str = app_name
         self.app_handle: DeploymentHandle | None = None
@@ -48,6 +58,7 @@ class _ModelContext:
         self.model_type: _ModelType = model_type
         self.route_prefix: str = route_prefix
         self.wrapper_name: str = "ModelApp"  # The name of the model deployment
+        self.gpus_per_replica: int = gpus_per_replica
         self.used_gpus: int = 0
 
 
@@ -55,6 +66,7 @@ class UserRequest(BaseModel):
     mode: str
     model_name: str
     model_type: str | None = None
+    gpus_per_replica: int = 1
     file_path: str | None = None
 
 
@@ -90,17 +102,19 @@ class ModelController:
     ) -> None:
         """
         Ray uses config file (yaml) to dynamically update serve apps and deployments.
-        ModelController maintains a local copy of the config file (self._config), which is updated whenever a model is added, removed, activated, or deactivated.
-        ModelController sends the config file to the Ray dashboard service, which then updates the serve apps and deployments.
+        ModelController maintains a local copy of the config file (self._config), which is updated
+        whenever a model is added, removed, activated, or deactivated.
+        ModelController sends the config file to the Ray dashboard service, which then updates the
+        serve apps and deployments.
 
         Refer to Ray documentation for more details about the format of the config files.
         """
         apps: list[dict] = self._config["applications"]
         if app_action == _AppAction.ADD:
             if self._has_available_gpu():
-                num_gpus: int = 1
-                is_active: bool = True
-                model.used_gpus = 1
+                num_gpus = 1
+                is_active = True
+                model.used_gpus = model.gpus_per_replica
             else:
                 num_gpus = 0
                 is_active = False
@@ -109,6 +123,27 @@ class ModelController:
                 import_path = "vllm_raw:app_builder"
             elif model.model_type == _ModelType.VLLM_OPENAI:
                 import_path = "vllm_server.openai.vllm_openai:app_builder"
+            if model.gpus_per_replica == 1:
+                deployments = [
+                    {
+                        "name": model.wrapper_name,
+                        "num_replicas": 1,
+                        "ray_actor_options": {"num_gpus": num_gpus},
+                        "user_config": {"is_active": is_active},
+                    },
+                ]
+            else:
+                # VLLM supports distributed inference via Ray. However, this seems to conflict with
+                # Ray serve if we explicitly specify num_gpus. For now, we just set
+                # tensor_parallel_size to the required number and trust VLLM and Ray will do their
+                # jobs.
+                deployments = [
+                    {
+                        "name": model.wrapper_name,
+                        "num_replicas": 1,
+                        "user_config": {"is_active": is_active},
+                    },
+                ]
             apps.append(
                 {
                     "name": model.app_name,
@@ -117,15 +152,9 @@ class ModelController:
                     "args": {
                         "model_name": model.model_name,
                         "controller": self._config["applications"][0]["name"],
+                        "gpus_per_replica": model.gpus_per_replica,
                     },
-                    "deployments": [
-                        {
-                            "name": model.wrapper_name,
-                            "num_replicas": 1,
-                            "ray_actor_options": {"num_gpus": num_gpus},
-                            "user_config": {"is_active": is_active},
-                        },
-                    ],
+                    "deployments": deployments,
                 }
             )
         elif app_action == _AppAction.REMOVE:
@@ -138,12 +167,13 @@ class ModelController:
                 None,
             )
             if deploy_action == _DeploymentAction.ACTIVATE:
-                app["deployments"][0]["ray_actor_options"]["num_gpus"] = 1
                 app["deployments"][0]["user_config"]["is_active"] = True
-                model.used_gpus = 1
+                if model.gpus_per_replica == 1:
+                    app["deployments"][0]["ray_actor_options"]["num_gpus"] = 1
+                model.used_gpus = model.gpus_per_replica
             else:
-                app["deployments"][0]["ray_actor_options"]["num_gpus"] = 0
                 app["deployments"][0]["user_config"]["is_active"] = False
+                app["deployments"][0]["ray_actor_options"]["num_gpus"] = 0
                 model.used_gpus = 0
 
         # The following code sends a request containing the updated config file to the Ray
@@ -160,10 +190,11 @@ class ModelController:
         )
 
     async def _get_or_register_model(
-        self, model_name: str, model_type: _ModelType
+        self, model_name: str, model_type: _ModelType, gpus_per_replica: int
     ) -> str:
         """
-        Return the route prefix of the requested model. Create a serve app for the model if it's not created yet.
+        Return the route prefix of the requested model. Create a serve app for the model if it's
+        not created yet.
         """
         async with self._lock:
             if model_name not in self._model_pool:
@@ -172,6 +203,7 @@ class ModelController:
                     model_name=model_name,
                     route_prefix=f"/model-{self._num_served_models}",
                     model_type=model_type,
+                    gpus_per_replica=gpus_per_replica,
                 )
                 self._model_pool[model_name] = model_context
                 self._num_served_models += 1
@@ -211,7 +243,8 @@ class ModelController:
                 model_type = _ModelType.VLLM_OPENAI
             else:
                 return "Invalid model type. Aborting."
-            return await self._get_or_register_model(model_name, model_type)
+            num_gpus: int = request.gpus_per_replica
+            return await self._get_or_register_model(model_name, model_type, num_gpus)
         elif mode == "delete":
             return await self._delete_model(model_name)
         elif mode == "dump_config":
@@ -228,7 +261,8 @@ class ModelController:
         """
         Loads model_in into GPU. Unloads model_out from GPU if necessary.
         It's the caller's responsibility to ensure the availability of GPU resources.
-        This function does not verify whether deactivating model_out actually releases GPU resources, nor does it check for the availability of any GPU.
+        This function does not verify whether deactivating model_out actually releases GPU
+        resources, nor does it check for the availability of any GPU.
         """
         if model_out is not None:
             self._update_app(
@@ -244,7 +278,8 @@ class ModelController:
 
     async def _select_victim(self, initiator: _ModelContext) -> _ModelContext:
         """
-        The initiator model has requested to load itself into GPU. However, there is no available GPU. This function selects a victim model to evict from GPU.
+        The initiator model has requested to load itself into GPU. However, there is no available
+        GPU. This function selects a victim model to evict from GPU.
         """
         candidates = []
         for model in self._model_pool.values():

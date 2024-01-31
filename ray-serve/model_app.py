@@ -21,3 +21,4 @@ class ModelAppInterface(ABC):
 class ModelAppArgs(BaseModel):
     model_name: str
     controller: str
+    gpus_per_replica: int = 1
