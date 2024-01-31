@@ -11,8 +11,10 @@ parser.add_argument(
 parser.add_argument(
     "--endpoint", help="LLM-Serving Endpoint", type=str, default="127.0.0.1:8000/llm"
 )
-parser.add_argument("--model-name", help="Model Name", type=str, required=True)
-parser.add_argument("--model-type", help="Model Type", type=str, required=True)
+parser.add_argument(
+    "--model-name", help="Model Name", type=str, default="meta-llama/Llama-2-7b-chat-hf"
+)
+parser.add_argument("--model-type", help="Model Type", type=str, default="vllm_raw")
 args = parser.parse_args()
 
 
