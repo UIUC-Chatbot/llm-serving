@@ -1,12 +1,16 @@
 import fastapi
+import gc
 from model_app import ModelAppInterface, ModelAppArgs
 from pydantic import BaseModel
 from ray import serve
 from ray.serve import Application
 from ray.serve.handle import DeploymentHandle
 import time
+import torch
+import torch.distributed
 from typing import Any
 from vllm import LLM, SamplingParams
+from vllm.model_executor.parallel_utils.parallel_state import destroy_model_parallel
 
 
 class UserRequest(BaseModel):
@@ -69,6 +73,12 @@ class ModelApp(ModelAppInterface):
                 model=self._model_name, tensor_parallel_size=self._gpus_per_replica
             )
         else:
+            if self._gpus_per_replica > 1:
+                destroy_model_parallel()
+                del self._model
+                gc.collect()
+                torch.cuda.empty_cache()
+                torch.distributed.destroy_process_group()
             self._model = None
 
     def collect_eviction_defense_metrics(self) -> dict[str, Any]:

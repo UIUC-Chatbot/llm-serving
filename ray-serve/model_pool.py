@@ -85,14 +85,14 @@ class ModelController:
         self._num_gpus: int = num_gpus
         self._num_served_models: int = 0
 
-    def _has_available_gpu(self) -> bool:
+    def _has_available_gpu(self, required_gpus: int) -> bool:
         """
         Check if there is any available GPU.
         """
         used_gpus: int = 0
         for model_name in self._model_pool.keys():
             used_gpus += self._model_pool[model_name].used_gpus
-        return self._num_gpus > used_gpus
+        return self._num_gpus >= used_gpus + required_gpus
 
     def _update_app(
         self,
@@ -111,12 +111,10 @@ class ModelController:
         """
         apps: list[dict] = self._config["applications"]
         if app_action == _AppAction.ADD:
-            if self._has_available_gpu():
-                num_gpus = 1
+            if self._has_available_gpu(model.gpus_per_replica):
                 is_active = True
                 model.used_gpus = model.gpus_per_replica
             else:
-                num_gpus = 0
                 is_active = False
                 model.used_gpus = 0
             if model.model_type == _ModelType.VLLM_RAW:
@@ -128,7 +126,7 @@ class ModelController:
                     {
                         "name": model.wrapper_name,
                         "num_replicas": 1,
-                        "ray_actor_options": {"num_gpus": num_gpus},
+                        "ray_actor_options": {"num_gpus": model.used_gpus},
                         "user_config": {"is_active": is_active},
                     },
                 ]
@@ -173,7 +171,8 @@ class ModelController:
                 model.used_gpus = model.gpus_per_replica
             else:
                 app["deployments"][0]["user_config"]["is_active"] = False
-                app["deployments"][0]["ray_actor_options"]["num_gpus"] = 0
+                if model.gpus_per_replica == 1:
+                    app["deployments"][0]["ray_actor_options"]["num_gpus"] = 0
                 model.used_gpus = 0
 
         # The following code sends a request containing the updated config file to the Ray
@@ -304,7 +303,7 @@ class ModelController:
             model = self._model_pool[model_name]
             if model.used_gpus > 0:
                 return  # If the model is already loaded, ignore this request.
-            if self._has_available_gpu():
+            if self._has_available_gpu(model.gpus_per_replica):
                 # If there is an available GPU, load the model.
                 return self._load_or_replace_model(model)
             # If there is no available GPU, evict a model from GPU and load the requested model.

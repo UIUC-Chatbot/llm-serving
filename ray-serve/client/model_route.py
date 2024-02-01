@@ -15,6 +15,7 @@ parser.add_argument(
     "--model-name", help="Model Name", type=str, default="meta-llama/Llama-2-7b-chat-hf"
 )
 parser.add_argument("--model-type", help="Model Type", type=str, default="vllm_raw")
+parser.add_argument("--num-gpus", type=int, default=1)
 args = parser.parse_args()
 
 
@@ -24,6 +25,7 @@ if args.mode == 0:
         "mode": "get",
         "model_name": args.model_name,  # e.g., meta-llama/Llama-2-7b-chat-hf
         "model_type": args.model_type,  # e.g., vllm_openai
+        "gpus_per_replica": args.num_gpus,
     }
     response = requests.post(f"http://{args.endpoint}", json=data)
     output_text = response.text
