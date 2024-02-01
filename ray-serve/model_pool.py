@@ -27,18 +27,6 @@ Architecture:
 """
 
 
-class _AppAction(Enum):
-    ADD = 1  # Add a new serve app
-    ADD_LOAD = 2  # Add a new serve app and load it immediately
-    REMOVE = 3  # Remove a serve app
-    UPDATE = 4  # Update a serve app
-
-
-class _DeploymentAction(Enum):
-    ACTIVATE = 1  # Activate a deployment
-    DEACTIVATE = 2  # Deactivate a deployment
-
-
 class _ModelType(Enum):
     VLLM_RAW = 1  # Raw VLLM model, created by llm = LLM(model="model_name")
     VLLM_OPENAI = 2  # VLLM OpenAI-Compatible server
@@ -82,12 +70,24 @@ class _ConfigWriter:
         self._apps: list[dict] = self._config["applications"]
         self._logger: Logger = getLogger("ray.serve")
 
-    def _add_app(self, model: _ModelContext, is_active: bool) -> None:
+    def _apply_config(self) -> None:
+        """
+        The following code sends a request containing the latest config file to the Ray
+        dashboard, which then updates the serve apps and deployments. The call is async; it
+        returns immediately without waiting for the dashboard to finish the update.
+        """
+        ServeDeploySchema.parse_obj(self._config)
+        address: str = os.environ.get("RAY_DASHBOARD_ADDRESS", "http://localhost:8265")
+        ServeSubmissionClient(address).deploy_applications(self._config)
+
+    def add_app(self, model: _ModelContext, is_active: bool) -> None:
         # import_path is the path to the actual model implementation.
         if model.model_type == _ModelType.VLLM_RAW:
-            import_path = "vllm_raw:app_builder"
+            import_path = "models.vllm_raw:app_builder"
         elif model.model_type == _ModelType.VLLM_OPENAI:
-            import_path = "vllm_server.openai.vllm_openai:app_builder"
+            import_path = "models.vllm_server.openai.vllm_openai:app_builder"
+        else:
+            raise ValueError("Invalid model type.")
 
         # VLLM supports distributed inference via Ray. However, this seems to conflict with
         # Ray serve if we explicitly specify num_gpus of that deployment. For now, we just set
@@ -130,17 +130,24 @@ class _ConfigWriter:
             }
         )
 
-    def _remove_app(self, model: _ModelContext) -> None:
+        self._apply_config()
+        self._logger.info(f"App: {model.app_name} added.")
+
+    def remove_app(self, model: _ModelContext) -> None:
         self._config["applications"] = [
             app for app in self._apps if app.get("name") != model.app_name
         ]
         self._apps = self._config["applications"]
+        self._apply_config()
+        self._logger.info(f"App: {model.app_name} removed.")
 
-    def _activate_app(self, model: _ModelContext) -> None:
+    def activate_app(self, model: _ModelContext) -> None:
         app = next(
             (d for d in self._apps if d.get("name") == model.app_name),
             None,
         )
+        if app is None:
+            raise ValueError(f"App {model.app_name} not found.")
         app["deployments"][0]["user_config"]["is_active"] = True
         if model.gpus_per_replica == 1:
             app["deployments"][0]["ray_actor_options"]["num_gpus"] = 1
@@ -148,47 +155,26 @@ class _ConfigWriter:
             # Distributed inference shouldn't use num_gpus, see comments in _add_app() for details.
             app["deployments"][0]["ray_actor_options"].pop("num_gpus", None)
 
-    def _deactivate_app(self, model: _ModelContext) -> None:
+        self._apply_config()
+        self._logger.info(f"App: {model.app_name} activated.")
+
+    def deactivate_app(self, model: _ModelContext) -> None:
         app = next(
             (d for d in self._apps if d.get("name") == model.app_name),
             None,
         )
+        if app is None:
+            raise ValueError(f"App {model.app_name} not found.")
         app["deployments"][0]["user_config"]["is_active"] = False
         # We set num_gpus to 0 for distributed inference, too, to force a redeployment.
         app["deployments"][0]["ray_actor_options"]["num_gpus"] = 0
 
+        self._apply_config()
+        self._logger.info(f"App: {model.app_name} deactivated.")
+
     def dump_config(self, file_path: str) -> None:
         with open(file_path, "w") as file:
             yaml.dump(self._config, file, sort_keys=False)
-
-    def update_config(
-        self,
-        model: _ModelContext,
-        app_action: _AppAction,
-        deploy_action: _DeploymentAction | None = None,
-    ) -> None:
-        if app_action == _AppAction.ADD:
-            self._add_app(model, False)
-        elif app_action == _AppAction.ADD_LOAD:
-            self._add_app(model, True)
-        elif app_action == _AppAction.REMOVE:
-            self._remove_app(model)
-        elif app_action == _AppAction.UPDATE:
-            if deploy_action == _DeploymentAction.ACTIVATE:
-                self._activate_app(model)
-            elif deploy_action == _DeploymentAction.DEACTIVATE:
-                self._deactivate_app(model)
-
-        # The following code sends a request containing the updated config file to the Ray
-        # dashboard, which then updates the serve apps and deployments. The call is async; it
-        # returns immediately without waiting for the dashboard to finish the update.
-        ServeDeploySchema.parse_obj(self._config)
-        address: str = os.environ.get("RAY_DASHBOARD_ADDRESS", "http://localhost:8265")
-        ServeSubmissionClient(address).deploy_applications(self._config)
-
-        # Log the update
-        deploy_status: str = f", Deployment: {deploy_action}" if deploy_action else ""
-        self._logger.info(f"App: {model.app_name}, Action: {app_action}{deploy_status}")
 
 
 class UserRequest(BaseModel):
@@ -241,14 +227,10 @@ class ModelController:
                 self._num_served_models += 1
                 if self._has_available_gpu(gpus_per_replica):
                     model_context.used_gpus = gpus_per_replica
-                    self._config_writer.update_config(
-                        model=model_context, app_action=_AppAction.ADD_LOAD
-                    )
+                    self._config_writer.add_app(model=model_context, is_active=True)
                 else:
                     model_context.used_gpus = 0
-                    self._config_writer.update_config(
-                        model=model_context, app_action=_AppAction.ADD
-                    )
+                    self._config_writer.add_app(model=model_context, is_active=False)
                 self._model_pool[model_name] = model_context
             route = f"Route prefix: {self._model_pool[model_name].route_prefix}"
             server_type = f"Server type: {model_type}"
@@ -260,9 +242,7 @@ class ModelController:
         """
         async with self._lock:
             if model_name in self._model_pool:
-                self._config_writer.update_config(
-                    model=self._model_pool[model_name], app_action=_AppAction.REMOVE
-                )
+                self._config_writer.remove_app(model=self._model_pool[model_name])
                 self._model_pool.pop(model_name)
                 return f"Model {model_name} deleted."
             else:
@@ -277,7 +257,7 @@ class ModelController:
         model_name: str = request.model_name
 
         if mode == "get":
-            model_type: str = request.model_type
+            model_type = request.model_type
             if model_type == "vllm_raw":
                 model_type = _ModelType.VLLM_RAW
             elif model_type == "vllm_openai":
@@ -289,6 +269,8 @@ class ModelController:
         elif mode == "delete":
             return await self._delete_model(model_name)
         elif mode == "dump_config":
+            if request.file_path is None:
+                return "File path is not provided. Aborting."
             file_path: str = request.file_path
             self._config_writer.dump_config(file_path)
             return f"Config dumped to {file_path}"
@@ -305,17 +287,9 @@ class ModelController:
         resources, nor does it check for the availability of any GPU.
         """
         if model_out is not None:
-            self._config_writer.update_config(
-                model=model_out,
-                app_action=_AppAction.UPDATE,
-                deploy_action=_DeploymentAction.DEACTIVATE,
-            )
+            self._config_writer.deactivate_app(model_out)
             model_out.used_gpus = 0
-        self._config_writer.update_config(
-            model=model_in,
-            app_action=_AppAction.UPDATE,
-            deploy_action=_DeploymentAction.ACTIVATE,
-        )
+        self._config_writer.activate_app(model_in)
         model_in.used_gpus = model_in.gpus_per_replica
 
     async def _select_victim(

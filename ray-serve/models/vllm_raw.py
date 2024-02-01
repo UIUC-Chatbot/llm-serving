@@ -37,16 +37,14 @@ class ModelApp(ModelAppInterface):
     async def call(self, request: UserRequest) -> str | list[str]:
         if self._is_active:
             self._last_served_time = time.time()
-            prompt: list[str] | str = request.prompt
-            if type(prompt) == str:
-                prompt: list[str] = [prompt]
+            input_data: list[str] = [request.prompt]
             outputs = []
-            model_outputs = self._model.generate(prompt, self._sampling_params)
+            model_outputs = self._model.generate(input_data, self._sampling_params)  # type: ignore
             for output in model_outputs:
-                prompt = output.prompt
+                input_prompt = output.prompt
                 generated_text = output.outputs[0].text
                 outputs.append(
-                    f"Model {self._model_name}, Prompt: {prompt!r}, Generated tex{generated_text!r}"
+                    f"Model {self._model_name}, Prompt: {input_prompt!r}, Generated tex{generated_text!r}"
                 )
             return outputs
         else:
