@@ -1,7 +1,5 @@
 import argparse
-import asyncio
 import json
-from contextlib import asynccontextmanager
 import os
 import importlib
 import inspect
@@ -30,30 +28,6 @@ from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
 from model_app import ModelAppInterface, ModelAppArgs
 from ray import serve
 import time
-
-
-args = None
-openai_serving_chat: OpenAIServingChat = None
-openai_serving_completion: OpenAIServingCompletion = None
-logger = init_logger(__name__)
-served_model = None
-
-
-@asynccontextmanager
-async def lifespan(app: fastapi.FastAPI):
-
-    async def _force_log():
-        while True:
-            await asyncio.sleep(10)
-            await engine.do_log_stats()
-
-    if not engine_args.disable_log_stats:
-        asyncio.create_task(_force_log())
-
-    yield
-
-
-app = fastapi.FastAPI(lifespan=lifespan)
 
 
 def parse_args(model_name: str):
@@ -138,48 +112,9 @@ def parse_args(model_name: str):
     return parser.parse_args(["--served-model-name", model_name, "--model", model_name])
 
 
+app = fastapi.FastAPI()
 app.add_middleware(MetricsMiddleware)  # Trace HTTP server metrics
 app.add_route("/metrics", metrics)  # Exposes HTTP metrics
-
-
-@app.exception_handler(RequestValidationError)
-async def validation_exception_handler(_, exc):
-    err = openai_serving_chat.create_error_response(message=str(exc))
-    return JSONResponse(err.model_dump(), status_code=HTTPStatus.BAD_REQUEST)
-
-
-@app.get("/health")
-async def health() -> Response:
-    """Health check."""
-    return Response(status_code=200)
-
-
-@app.get("/v1/models")
-async def show_available_models():
-    models = await openai_serving_chat.show_available_models()
-    return JSONResponse(content=models.model_dump())
-
-
-@app.post("/v1/chat/completions")
-async def create_chat_completion(request: ChatCompletionRequest, raw_request: Request):
-    generator = await openai_serving_chat.create_chat_completion(request, raw_request)
-    if isinstance(generator, ErrorResponse):
-        return JSONResponse(content=generator.model_dump(), status_code=generator.code)
-    if request.stream:
-        return StreamingResponse(content=generator, media_type="text/event-stream")
-    else:
-        return JSONResponse(content=generator.model_dump())
-
-
-@app.post("/v1/completions")
-async def create_completion(request: CompletionRequest, raw_request: Request):
-    generator = await openai_serving_completion.create_completion(request, raw_request)
-    if isinstance(generator, ErrorResponse):
-        return JSONResponse(content=generator.model_dump(), status_code=generator.code)
-    if request.stream:
-        return StreamingResponse(content=generator, media_type="text/event-stream")
-    else:
-        return JSONResponse(content=generator.model_dump())
 
 
 @serve.deployment(name="ModelApp")
@@ -187,18 +122,18 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
 class ModelApp(ModelAppInterface):
 
     def __init__(self, model_name: str, controller: str) -> None:
-        global args
-        args = parse_args(model_name)
+        self.args = parse_args(model_name)
+        self.logger = init_logger(__name__)
 
         app.add_middleware(
             CORSMiddleware,
-            allow_origins=args.allowed_origins,
-            allow_credentials=args.allow_credentials,
-            allow_methods=args.allowed_methods,
-            allow_headers=args.allowed_headers,
+            allow_origins=self.args.allowed_origins,
+            allow_credentials=self.args.allow_credentials,
+            allow_methods=self.args.allowed_methods,
+            allow_headers=self.args.allowed_headers,
         )
 
-        if token := os.environ.get("VLLM_API_KEY") or args.api_key:
+        if token := os.environ.get("VLLM_API_KEY") or self.args.api_key:
 
             @app.middleware("http")
             async def authentication(request: Request, call_next):
@@ -210,7 +145,7 @@ class ModelApp(ModelAppInterface):
                     )
                 return await call_next(request)
 
-        for middleware in args.middleware:
+        for middleware in self.args.middleware:
             module_path, object_name = middleware.rsplit(".", 1)
             imported = getattr(importlib.import_module(module_path), object_name)
             if inspect.isclass(imported):
@@ -222,17 +157,17 @@ class ModelApp(ModelAppInterface):
                     f"Invalid middleware {middleware}. Must be a function or a class."
                 )
 
-        logger.info(f"args: {args}")
+        self.logger.info(f"args: {self.args}")
 
         global served_model
-        if args.served_model_name is not None:
-            served_model = args.served_model_name
+        if self.args.served_model_name is not None:
+            self.served_model = self.args.served_model_name
         else:
-            served_model = args.model
+            self.served_model = self.args.model
 
         # LLM-serving related fields
         self._is_active: bool = False
-        # self._controller_app = serve.get_app_handle(controller)
+        self._controller_app = serve.get_app_handle(controller)
         self._last_served_time = time.time()
         self._unhandled_requests = 0
 
@@ -242,24 +177,72 @@ class ModelApp(ModelAppInterface):
         """
         self._is_active: bool = config["is_active"]
         if self._is_active:
-            global openai_serving_chat
-            global openai_serving_completion
-            engine_args = AsyncEngineArgs.from_cli_args(args)
+            engine_args = AsyncEngineArgs.from_cli_args(self.args)
             engine = AsyncLLMEngine.from_engine_args(engine_args)
-            openai_serving_chat = OpenAIServingChat(
-                engine, served_model, args.response_role, args.chat_template
+            self.openai_serving_chat = OpenAIServingChat(
+                engine,
+                self.served_model,
+                self.args.response_role,
+                self.args.chat_template,
             )
-            openai_serving_completion = OpenAIServingCompletion(engine, served_model)
+            self.openai_serving_completion = OpenAIServingCompletion(
+                engine, self.served_model
+            )
 
             # Register labels for metrics
             add_global_metrics_labels(model_name=engine_args.model)
-            app.root_path = args.root_path
+            app.root_path = self.args.root_path
 
     def collect_eviction_defense_metrics(self) -> dict:
         """
         This method is called when the ModelController is trying to evict a model from GPU. It returns metrics that justify the model's continued operation on GPU.
         """
         return {"last_served_time": self._last_served_time}
+
+    @app.exception_handler(RequestValidationError)
+    async def validation_exception_handler(self, _, exc):
+        err = self.openai_serving_chat.create_error_response(message=str(exc))
+        return JSONResponse(err.model_dump(), status_code=HTTPStatus.BAD_REQUEST)
+
+    @app.get("/health")
+    async def health(self) -> Response:
+        """Health check."""
+        return Response(status_code=200)
+
+    @app.get("/v1/models")
+    async def show_available_models(self):
+        models = await self.openai_serving_chat.show_available_models()
+        return JSONResponse(content=models.model_dump())
+
+    @app.post("/v1/chat/completions")
+    async def create_chat_completion(
+        self, request: ChatCompletionRequest, raw_request: Request
+    ):
+        generator = await self.openai_serving_chat.create_chat_completion(
+            request, raw_request
+        )
+        if isinstance(generator, ErrorResponse):
+            return JSONResponse(
+                content=generator.model_dump(), status_code=generator.code
+            )
+        if request.stream:
+            return StreamingResponse(content=generator, media_type="text/event-stream")
+        else:
+            return JSONResponse(content=generator.model_dump())
+
+    @app.post("/v1/completions")
+    async def create_completion(self, request: CompletionRequest, raw_request: Request):
+        generator = await self.openai_serving_completion.create_completion(
+            request, raw_request
+        )
+        if isinstance(generator, ErrorResponse):
+            return JSONResponse(
+                content=generator.model_dump(), status_code=generator.code
+            )
+        if request.stream:
+            return StreamingResponse(content=generator, media_type="text/event-stream")
+        else:
+            return JSONResponse(content=generator.model_dump())
 
 
 def app_builder(args: ModelAppArgs):
