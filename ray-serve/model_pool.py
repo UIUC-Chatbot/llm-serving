@@ -1,14 +1,22 @@
 import asyncio
 from enum import Enum
-import fastapi
+from fastapi import FastAPI, Request
+from fastapi.responses import Response
 from logging import getLogger, Logger
 import os
 from pydantic import BaseModel
 from ray import serve
 from ray.dashboard.modules.serve.sdk import ServeSubmissionClient
 from ray.serve import Application
+from ray.serve.exceptions import RayServeException
 from ray.serve.handle import DeploymentHandle
 from ray.serve.schema import ServeDeploySchema
+import time
+from vllm.entrypoints.openai.protocol import (
+    CompletionRequest,
+    ChatCompletionRequest,
+    ErrorResponse,
+)
 import yaml
 
 """
@@ -18,8 +26,8 @@ Architecture:
     on demand and performs model switching when necessary. It also handles model deletion requests.
 
     Each individual model is wrapped in a ModelApp class and deployed as its own Ray Serve app.
-    ModelApp is an abstract class, and the actual model implementation is specified by the
-    model_type.
+    They have their own endpoints. ModelApp is an abstract class, and the actual mode
+    implementation is specified by the model_type.
 
     When a ModelApp is inactive, users might request to load that model. The ModelApp sends a
     request to the ModelController to load the model. The ModelController might select a victim
@@ -42,13 +50,24 @@ class _ModelContext:
         gpus_per_replica: int,
     ) -> None:
         self.app_name: str = app_name
-        self.app_handle: DeploymentHandle | None = None
+        self.app_handle: DeploymentHandle
         self.model_name: str = model_name
         self.model_type: _ModelType = model_type
         self.route_prefix: str = route_prefix
         self.wrapper_name: str = "ModelApp"  # The name of the model deployment
+        self.created_time: int = int(time.time())
         self.gpus_per_replica: int = gpus_per_replica
         self.used_gpus: int = 0
+
+    async def maybe_wait_until_ready(self) -> None:
+        """
+        Wait until the serve app is deployed.
+        """
+        start_time = asyncio.get_event_loop().time()
+        while not hasattr(self, "app_handle"):
+            if asyncio.get_event_loop().time() - start_time > 10:  # Timeout
+                raise TimeoutError(f"App for model {self.model_name} doesn't exist.")
+            await asyncio.sleep(0.5)
 
 
 class _ConfigWriter:
@@ -85,7 +104,7 @@ class _ConfigWriter:
         if model.model_type == _ModelType.VLLM_RAW:
             import_path = "models.vllm_raw:app_builder"
         elif model.model_type == _ModelType.VLLM_OPENAI:
-            import_path = "models.vllm_server.openai.vllm_openai:app_builder"
+            import_path = "models.vllm_openai.openai_server:app_builder"
         else:
             raise ValueError("Invalid model type.")
 
@@ -166,7 +185,6 @@ class _ConfigWriter:
         if app is None:
             raise ValueError(f"App {model.app_name} not found.")
         app["deployments"][0]["user_config"]["is_active"] = False
-        # We set num_gpus to 0 for distributed inference, too, to force a redeployment.
         app["deployments"][0]["ray_actor_options"]["num_gpus"] = 0
 
         self._apply_config()
@@ -177,15 +195,16 @@ class _ConfigWriter:
             yaml.dump(self._config, file, sort_keys=False)
 
 
-class UserRequest(BaseModel):
+class AdminRequest(BaseModel):
+    key: str
     mode: str
     model_name: str
-    model_type: str | None = None
+    model_type: str = "vllm_openai"
     gpus_per_replica: int = 1
-    file_path: str | None = None
+    config_dump_path: str = "latest_config.yaml"
 
 
-main_app = fastapi.FastAPI()
+main_app = FastAPI()
 
 
 @serve.deployment
@@ -193,11 +212,13 @@ main_app = fastapi.FastAPI()
 class ModelController:
     def __init__(self, config_file_path: str, num_gpus: int) -> None:
         self._config_writer: _ConfigWriter = _ConfigWriter(config_file_path)
-        self._lock: asyncio.Lock = asyncio.Lock()
         self._logger: Logger = getLogger("ray.serve")
         self._model_pool: dict[str, _ModelContext] = {}
         self._num_gpus: int = num_gpus
         self._num_served_models: int = 0
+
+        # Lock required for modifying data structures
+        self._lock: asyncio.Lock = asyncio.Lock()
 
     def _has_available_gpu(self, required_gpus: int) -> bool:
         """
@@ -210,72 +231,60 @@ class ModelController:
 
     async def _get_or_register_model(
         self, model_name: str, model_type: _ModelType, gpus_per_replica: int
-    ) -> str:
+    ) -> _ModelContext:
         """
-        Return the route prefix of the requested model. Create a serve app for the model if it's
+        Return the model_context of the requested model. Create a serve app for the model if it's
         not created yet.
         """
-        async with self._lock:
-            if model_name not in self._model_pool:
-                model_context = _ModelContext(
-                    app_name=model_name.replace("/", "---"),
-                    model_name=model_name,
-                    route_prefix=f"/model-{self._num_served_models}",
-                    model_type=model_type,
-                    gpus_per_replica=gpus_per_replica,
-                )
-                self._num_served_models += 1
-                if self._has_available_gpu(gpus_per_replica):
-                    model_context.used_gpus = gpus_per_replica
-                    self._config_writer.add_app(model=model_context, is_active=True)
-                else:
-                    model_context.used_gpus = 0
-                    self._config_writer.add_app(model=model_context, is_active=False)
-                self._model_pool[model_name] = model_context
-            route = f"Route prefix: {self._model_pool[model_name].route_prefix}"
-            server_type = f"Server type: {model_type}"
-            return f"{route}, {server_type}"
+        if model_name in self._model_pool:
+            await self._model_pool[model_name].maybe_wait_until_ready()
+            return self._model_pool[model_name]
 
-    async def _delete_model(self, model_name: str) -> str:
+        async with self._lock:
+            if model_name in self._model_pool:
+                return self._model_pool[model_name]
+
+            model_context = _ModelContext(
+                app_name=model_name.replace("/", "---"),
+                model_name=model_name,
+                route_prefix=f"/model-{self._num_served_models}",
+                model_type=model_type,
+                gpus_per_replica=gpus_per_replica,
+            )
+            self._num_served_models += 1
+            if self._has_available_gpu(gpus_per_replica):
+                model_context.used_gpus = gpus_per_replica
+                self._config_writer.add_app(model=model_context, is_active=True)
+            else:
+                model_context.used_gpus = 0
+                self._config_writer.add_app(model=model_context, is_active=False)
+            self._model_pool[model_name] = model_context
+
+            # We just created the app and now we get the app handle to it.
+            # Note that app updates via config file are async, so we might need to wait for a while
+            # before the app is actually created.
+            start_time = asyncio.get_event_loop().time()
+            while True:
+                try:
+                    app_handle = serve.get_app_handle(model_context.app_name)
+                    model_context.app_handle = app_handle
+                    return self._model_pool[model_name]
+                except RayServeException:
+                    if asyncio.get_event_loop().time() - start_time > 10:  # Timeout
+                        raise TimeoutError(f"App for model {model_name} doesn't exist.")
+                    await asyncio.sleep(0.5)
+
+    async def _delete_model(self, model_name: str) -> bool:
         """
         Delete the model app with the given name.
         """
-        async with self._lock:
-            if model_name in self._model_pool:
+        if model_name in self._model_pool:
+            async with self._lock:
                 self._config_writer.remove_app(model=self._model_pool[model_name])
                 self._model_pool.pop(model_name)
-                return f"Model {model_name} deleted."
-            else:
-                return f"Model {model_name} not found."
-
-    @main_app.post("/")
-    async def call(self, request: UserRequest) -> str:
-        """
-        The entrypoint of the ModelController. The input should be conform to the UserRequest schema.
-        """
-        mode: str = request.mode
-        model_name: str = request.model_name
-
-        if mode == "get":
-            model_type = request.model_type
-            if model_type == "vllm_raw":
-                model_type = _ModelType.VLLM_RAW
-            elif model_type == "vllm_openai":
-                model_type = _ModelType.VLLM_OPENAI
-            else:
-                return "Invalid model type. Aborting."
-            num_gpus: int = request.gpus_per_replica
-            return await self._get_or_register_model(model_name, model_type, num_gpus)
-        elif mode == "delete":
-            return await self._delete_model(model_name)
-        elif mode == "dump_config":
-            if request.file_path is None:
-                return "File path is not provided. Aborting."
-            file_path: str = request.file_path
-            self._config_writer.dump_config(file_path)
-            return f"Config dumped to {file_path}"
+                return True
         else:
-            return "Invalid mode. Aborting."
+            return False
 
     def _load_or_replace_model(
         self, model_in: _ModelContext, model_out: None | _ModelContext = None
@@ -306,8 +315,7 @@ class ModelController:
             # TODO: we can remove more than one model at a time if they are not used.
             if model.used_gpus < required_gpus:
                 continue
-            if model.app_handle is None:
-                model.app_handle = serve.get_app_handle(model.app_name)
+            # TODO: what if the app is not ready yet? So far, hasn't run into issues.
             metrics = await model.app_handle.collect_eviction_defense_metrics.remote()
             candidates.append((model, metrics["last_served_time"]))
         # Remove the least recently used model
@@ -319,8 +327,8 @@ class ModelController:
         """
         This function is called by an inactive ModelApp who wants to load itself into GPU.
         """
+        model = self._model_pool[model_name]
         async with self._lock:
-            model = self._model_pool[model_name]
             if model.used_gpus > 0:
                 return  # If the model is already loaded, ignore this request.
             if self._has_available_gpu(model.gpus_per_replica):
@@ -331,6 +339,78 @@ class ModelController:
                 model, model.gpus_per_replica
             )
             return self._load_or_replace_model(model, victim)
+
+    """
+    OpenAI-ish API endpoints
+    """
+
+    @main_app.get("/health")
+    async def health(self) -> Response:
+        """Health check."""
+        return Response(status_code=200)
+
+    @main_app.get("/v1/models")
+    async def show_available_models(self):
+        def model_dump(models: list[dict]):
+            for model in self._model_pool.values():
+                model_info: dict = {
+                    "id": model.model_name,
+                    "object": "model",
+                    "created": model.created_time,
+                    "owned_by": "NCSA",
+                }
+                models.append(model_info)
+
+        models = []
+        model_dump(models)
+        return {"object": "list", "data": models}
+
+    @main_app.post("/v1/chat/completions")
+    async def create_chat_completion(
+        self, request: ChatCompletionRequest, raw_request: Request
+    ):
+        if request.model in self._model_pool:
+            self._logger.info(f"Model {request.model} found.")
+            return "Model found."
+        else:
+            return ErrorResponse(
+                message=f"The model `{request.model}` does not exist.",
+                type="NotFoundError",
+                code=404,
+            )
+
+    """
+    Admin API endpoints
+    """
+
+    @main_app.post("/admin")
+    async def admin_call(self, request: AdminRequest) -> str:
+        # TODO: the key is currently visible on GitHub. We need to change this.
+        if request.key != "IloveRocknRoll":
+            return "Permission denied. Aborting."
+        if request.mode == "get":
+            if request.model_type == "vllm_raw":
+                model_type = _ModelType.VLLM_RAW
+            elif request.model_type == "vllm_openai":
+                model_type = _ModelType.VLLM_OPENAI
+            else:
+                return "Invalid model type. Aborting."
+            model_context = await self._get_or_register_model(
+                model_name=request.model_name,
+                model_type=model_type,
+                gpus_per_replica=request.gpus_per_replica,
+            )
+            return f"Model {model_context.model_name} endpoint: {model_context.route_prefix}"
+        elif request.mode == "delete":
+            if await self._delete_model(request.model_name):
+                return f"Model {request.model_name} deleted."
+            else:
+                return f"Model {request.model_name} not found."
+        elif request.mode == "dump_config":
+            self._config_writer.dump_config(request.config_dump_path)
+            return f"Config dumped to {request.config_dump_path}"
+        else:
+            return "Invalid mode. Aborting."
 
 
 class ControllerArgs(BaseModel):
