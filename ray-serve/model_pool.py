@@ -1,10 +1,11 @@
 import asyncio
 from enum import Enum
 from fastapi import FastAPI, Request
-from fastapi.responses import Response
+from fastapi.responses import JSONResponse, Response
 from logging import getLogger, Logger
 import os
 from pydantic import BaseModel
+import ray
 from ray import serve
 from ray.dashboard.modules.serve.sdk import ServeSubmissionClient
 from ray.serve import Application
@@ -54,16 +55,35 @@ class _ModelContext:
         self.created_time: int = int(time.time())
         self.gpus_per_replica: int = gpus_per_replica
         self.used_gpus: int = 0
+        self._is_healthy: bool
 
-    async def maybe_wait_until_ready(self) -> None:
+    async def init_handle(self) -> bool:
         """
-        Wait until the serve app is deployed.
+        Initialize the app handle to the serve app. This function should be called only by the
+        function who creates the app.
+        Note that app updates via config file are async, so we might need to wait for a while before
+        the app is actually created.
         """
-        start_time = asyncio.get_event_loop().time()
-        while not hasattr(self, "app_handle"):
-            if asyncio.get_event_loop().time() - start_time > 10:  # Timeout
-                raise TimeoutError(f"App for model {self.model_name} can't be created.")
-            await asyncio.sleep(0.5)
+        while True:
+            app_status = serve.status().applications[self.app_name].status
+            if app_status == "RUNNING":
+                self.app_handle = serve.get_app_handle(self.app_name)
+                self._is_healthy = True
+                break
+            elif app_status == "DEPLOY_FAILED":
+                self._is_healthy = False
+                break
+            await asyncio.sleep(1)
+        return self._is_healthy
+
+    def get_error_message(self) -> str:
+        msg = (
+            serve.status()
+            .applications[self.app_name]
+            .deployments[self.wrapper_name]
+            .message
+        )
+        return msg
 
 
 class _ConfigWriter:
@@ -219,11 +239,13 @@ class ModelController:
     def __init__(self, config_file_path: str, num_gpus: int) -> None:
         self._config_writer: _ConfigWriter = _ConfigWriter(config_file_path)
         self._logger: Logger = getLogger("ray.serve")
-        self._model_pool: dict[str, _ModelContext] = {}
-        self._num_gpus: int = num_gpus
+        self._model_pool: dict[str, _ModelContext] = {}  # Currently registered models
+        self._model_unsupported: dict[str, str] = {}  # Unsupported models
+        ray_total_gpus: int = ray.cluster_resources().get("GPU", 0)
+        self._num_gpus: int = min(num_gpus, ray_total_gpus)
         self._num_served_models: int = 0
 
-        # Lock required for modifying data structures
+        # Lock required for modifying model_pool and model_unsupported, i.e., updating serve apps
         self._lock: asyncio.Lock = asyncio.Lock()
 
     def _has_available_gpu(self, required_gpus: int) -> bool:
@@ -237,24 +259,28 @@ class ModelController:
 
     async def _get_or_register_model(
         self, model_name: str, model_type: _ModelType, gpus_per_replica: int
-    ) -> _ModelContext:
+    ) -> _ModelContext | None:
         """
         Return the model_context of the requested model. Create a serve app for the model if it's
         not created yet.
+        Return None if model deployment fails.
         """
         if model_name in self._model_pool:
-            await self._model_pool[model_name].maybe_wait_until_ready()
             return self._model_pool[model_name]
 
+        if model_name in self._model_unsupported:
+            return None
+
         if gpus_per_replica > self._num_gpus:
-            raise ValueError(
-                f"Requested {gpus_per_replica} GPUs for model {model_name}, but only {self._num_gpus} are available."
-            )
+            return None
 
         async with self._lock:
             if model_name in self._model_pool:
                 return self._model_pool[model_name]
+            if model_name in self._model_unsupported:
+                return None
 
+            # Create a new serve app for the requested model
             model_context = _ModelContext(
                 app_name=model_name.replace("/", "---"),
                 model_name=model_name,
@@ -269,35 +295,27 @@ class ModelController:
             else:
                 model_context.used_gpus = 0
                 self._config_writer.add_app(model=model_context, is_active=False)
-            self._model_pool[model_name] = model_context
 
-            # We just created the app and now we get the app handle to it.
-            # Note that app updates via config file are async, so we might need to wait for a while
-            # before the app is actually created.
-            start_time = asyncio.get_event_loop().time()
-            while True:
-                try:
-                    app_handle = serve.get_app_handle(model_context.app_name)
-                    model_context.app_handle = app_handle
-                    return self._model_pool[model_name]
-                except RayServeException:
-                    if asyncio.get_event_loop().time() - start_time > 10:  # Timeout
-                        raise TimeoutError(
-                            f"App for model {model_name} can't be created."
-                        )
-                    await asyncio.sleep(0.3)
+            # Initialize the app handle and get the app status
+            if await model_context.init_handle():
+                self._model_pool[model_name] = model_context
+                return model_context
+            else:
+                self._model_unsupported[model_name] = model_context.get_error_message()
+                self._config_writer.remove_app(model=model_context)
+                return None
 
     async def _delete_model(self, model_name: str) -> bool:
         """
         Delete the model app with the given name.
         """
-        if model_name in self._model_pool:
-            async with self._lock:
+        async with self._lock:
+            if model_name in self._model_pool:
                 self._config_writer.remove_app(model=self._model_pool[model_name])
                 self._model_pool.pop(model_name)
                 return True
-        else:
-            return False
+            else:
+                return False
 
     def _load_or_replace_model(
         self, model_in: _ModelContext, models_out: None | list[_ModelContext] = None
@@ -343,7 +361,7 @@ class ModelController:
             num_gpus_to_release += candidate[0].used_gpus
             if num_gpus_to_release >= required_gpus:
                 break
-        # TODO: do we need to wait here for a while?
+        # TODO: do we need to wait here for a while? What if the victims don't fulfill the requirement?
         return victims
 
     async def handle_unavailable_model(self, model_name: str) -> None:
@@ -384,7 +402,10 @@ class ModelController:
                 model_type=model_type,
                 gpus_per_replica=request.gpus_per_replica,
             )
-            return f"Model {model_context.model_name} endpoint: {model_context.route_prefix}"
+            if model_context is not None:
+                return f"Model {model_context.model_name} endpoint: {model_context.route_prefix}"
+            else:
+                return f"Model {request.model_name} not supported: {self._model_unsupported[request.model_name]}"
         elif request.mode == "delete":
             if await self._delete_model(request.model_name):
                 return f"Model {request.model_name} deleted."
@@ -425,11 +446,15 @@ class ModelController:
     async def create_chat_completion(
         self, request: ChatCompletionRequest, raw_request: Request
     ):
-        model_context: _ModelContext = await self._get_or_register_model(
+        model_context = await self._get_or_register_model(
             model_name=request.model,
             model_type=_ModelType.VLLM_OPENAI,
             gpus_per_replica=1,
         )
+        if model_context is None:
+            return JSONResponse(
+                content=self._model_unsupported[request.model], status_code=400
+            )
         retry = 0
         while retry < 3:
             try:
@@ -444,11 +469,15 @@ class ModelController:
 
     @main_app.post("/v1/completions")
     async def create_completion(self, request: CompletionRequest, raw_request: Request):
-        model_context: _ModelContext = await self._get_or_register_model(
+        model_context = await self._get_or_register_model(
             model_name=request.model,
             model_type=_ModelType.VLLM_OPENAI,
             gpus_per_replica=1,
         )
+        if model_context is None:
+            return JSONResponse(
+                content=self._model_unsupported[request.model], status_code=400
+            )
         retry = 0
         while retry < 3:
             try:
