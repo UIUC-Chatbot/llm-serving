@@ -9,3 +9,4 @@ Some (hopefully) helpful notes:
 - The original script uses `argparse` to parse command line arguments. This is not compatible with Ray Serve for whatever reason. Instead, we have to pass the arguments as function arguments, e.g.,  
   `return parser.parse_args(["--served-model-name", model_name, ... ])`
 - Some variables are defined in the global scope of the original script, such as the LLM model. We have to move these into the `reconfigure` method of the class. Do not move them into `__init__`, as `__init__` is called when the class is instantiated, and would load the model into memory even if the app is deployed as an inactive replica.
+- The model app might be active or inactive. When it is inactive and user request comes in, it has to call the controller to activate itself.

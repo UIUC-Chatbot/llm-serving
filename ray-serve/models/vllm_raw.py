@@ -3,6 +3,7 @@ from model_app import ModelAppInterface, ModelAppArgs
 from pydantic import BaseModel
 from ray import serve
 from ray.serve import Application
+from ray.serve.exceptions import RayServeException
 from ray.serve.handle import DeploymentHandle
 import time
 from typing import Any
@@ -33,29 +34,31 @@ class ModelApp(ModelAppInterface):
         self._last_served_time = time.time()
         self._sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 
+    async def _ensure_model_active(self) -> None:
+        """
+        This method should be called before serving a request. It ensures that the model is active and ready to serve requests.
+        """
+        if self._is_active:
+            return
+        await self._controller_app.handle_unavailable_model.remote(self._model_name)
+        raise RayServeException(
+            f"Model {self._model_name} is inactive. Service is restoring. Please try again later."
+        )
+
     @app.post("/")
     async def call(self, request: UserRequest) -> str | list[str]:
-        if self._is_active:
-            self._last_served_time = time.time()
-            input_data: list[str] = [request.prompt]
-            outputs = []
-            model_outputs = self._model.generate(input_data, self._sampling_params)  # type: ignore
-            for output in model_outputs:
-                input_prompt = output.prompt
-                generated_text = output.outputs[0].text
-                outputs.append(
-                    f"Model {self._model_name}, Prompt: {input_prompt!r}, Generated tex{generated_text!r}"
-                )
-            return outputs
-        else:
-            load_required = request.load_required
-            if load_required:
-                await self._controller_app.handle_unavailable_model.remote(
-                    self._model_name
-                )
-                return "Service restoring."
-            else:
-                return "Service temporarily unavailable."
+        await self._ensure_model_active()
+        self._last_served_time = time.time()
+        input_data: list[str] = [request.prompt]
+        outputs = []
+        model_outputs = self._model.generate(input_data, self._sampling_params)  # type: ignore
+        for output in model_outputs:
+            input_prompt = output.prompt
+            generated_text = output.outputs[0].text
+            outputs.append(
+                f"Model {self._model_name}, Prompt: {input_prompt!r}, Generated te{generated_text!r}"
+            )
+        return outputs
 
     def reconfigure(self, config: dict[str, Any]) -> None:
         """

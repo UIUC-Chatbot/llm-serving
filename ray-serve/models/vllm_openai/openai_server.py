@@ -1,3 +1,4 @@
+# type: ignore
 import argparse
 import json
 import os
@@ -27,6 +28,7 @@ from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
 
 from model_app import ModelAppInterface, ModelAppArgs
 from ray import serve
+from ray.serve.exceptions import RayServeException
 import time
 
 
@@ -199,6 +201,17 @@ class ModelApp(ModelAppInterface):
         """
         return {"last_served_time": self._last_served_time}
 
+    async def _ensure_model_active(self) -> None:
+        """
+        This method should be called before serving a request. It ensures that the model is active and ready to serve requests.
+        """
+        if self._is_active:
+            return
+        await self._controller_app.handle_unavailable_model.remote(self.served_model)
+        raise RayServeException(
+            f"Model {self.served_model} is inactive. Service is restoring. Please try again later."
+        )
+
     @app.exception_handler(RequestValidationError)
     async def validation_exception_handler(self, _, exc):
         err = self.openai_serving_chat.create_error_response(message=str(exc))
@@ -218,6 +231,7 @@ class ModelApp(ModelAppInterface):
     async def create_chat_completion(
         self, request: ChatCompletionRequest, raw_request: Request
     ):
+        await self._ensure_model_active()
         generator = await self.openai_serving_chat.create_chat_completion(
             request, raw_request
         )
@@ -232,6 +246,7 @@ class ModelApp(ModelAppInterface):
 
     @app.post("/v1/completions")
     async def create_completion(self, request: CompletionRequest, raw_request: Request):
+        await self._ensure_model_active()
         generator = await self.openai_serving_completion.create_completion(
             request, raw_request
         )

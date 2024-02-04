@@ -12,11 +12,7 @@ from ray.serve.exceptions import RayServeException
 from ray.serve.handle import DeploymentHandle
 from ray.serve.schema import ServeDeploySchema
 import time
-from vllm.entrypoints.openai.protocol import (
-    CompletionRequest,
-    ChatCompletionRequest,
-    ErrorResponse,
-)
+from vllm.entrypoints.openai.protocol import CompletionRequest, ChatCompletionRequest
 import yaml
 
 """
@@ -66,7 +62,7 @@ class _ModelContext:
         start_time = asyncio.get_event_loop().time()
         while not hasattr(self, "app_handle"):
             if asyncio.get_event_loop().time() - start_time > 10:  # Timeout
-                raise TimeoutError(f"App for model {self.model_name} doesn't exist.")
+                raise TimeoutError(f"App for model {self.model_name} can't be created.")
             await asyncio.sleep(0.5)
 
 
@@ -204,6 +200,16 @@ class AdminRequest(BaseModel):
     config_dump_path: str = "latest_config.yaml"
 
 
+class FakeRequest:
+    """
+    VLLM OpenAI server uses starlette raw request object, which is not serializable. We need to create a fake request object, which is serializable, to pass to the model.
+    As of now, vllm only uses is_disconnected() function.
+    """
+
+    async def is_disconnected(self):
+        return False
+
+
 main_app = FastAPI()
 
 
@@ -240,6 +246,11 @@ class ModelController:
             await self._model_pool[model_name].maybe_wait_until_ready()
             return self._model_pool[model_name]
 
+        if gpus_per_replica > self._num_gpus:
+            raise ValueError(
+                f"Requested {gpus_per_replica} GPUs for model {model_name}, but only {self._num_gpus} are available."
+            )
+
         async with self._lock:
             if model_name in self._model_pool:
                 return self._model_pool[model_name]
@@ -271,8 +282,10 @@ class ModelController:
                     return self._model_pool[model_name]
                 except RayServeException:
                     if asyncio.get_event_loop().time() - start_time > 10:  # Timeout
-                        raise TimeoutError(f"App for model {model_name} doesn't exist.")
-                    await asyncio.sleep(0.5)
+                        raise TimeoutError(
+                            f"App for model {model_name} can't be created."
+                        )
+                    await asyncio.sleep(0.3)
 
     async def _delete_model(self, model_name: str) -> bool:
         """
@@ -287,7 +300,7 @@ class ModelController:
             return False
 
     def _load_or_replace_model(
-        self, model_in: _ModelContext, model_out: None | _ModelContext = None
+        self, model_in: _ModelContext, models_out: None | list[_ModelContext] = None
     ) -> None:
         """
         Loads model_in into GPU. Unloads model_out from GPU if necessary.
@@ -295,33 +308,43 @@ class ModelController:
         This function does not verify whether deactivating model_out actually releases GPU
         resources, nor does it check for the availability of any GPU.
         """
-        if model_out is not None:
-            self._config_writer.deactivate_app(model_out)
-            model_out.used_gpus = 0
+        if models_out is not None:
+            for model_out in models_out:
+                self._config_writer.deactivate_app(model_out)
+                model_out.used_gpus = 0
         self._config_writer.activate_app(model_in)
         model_in.used_gpus = model_in.gpus_per_replica
 
     async def _select_victim(
         self, initiator: _ModelContext, required_gpus: int
-    ) -> _ModelContext:
+    ) -> list[_ModelContext]:
         """
         The initiator model has requested to load itself into GPU. However, there is no available
         GPU. This function selects a victim model to evict from GPU.
         """
         candidates = []
+        victims: list[_ModelContext] = []
         for model in self._model_pool.values():
             if model.app_name == initiator.app_name:
                 continue
-            # TODO: we can remove more than one model at a time if they are not used.
-            if model.used_gpus < required_gpus:
+            try:
+                metrics = (
+                    await model.app_handle.collect_eviction_defense_metrics.remote()
+                )
+            except RayServeException:
                 continue
-            # TODO: what if the app is not ready yet? So far, hasn't run into issues.
-            metrics = await model.app_handle.collect_eviction_defense_metrics.remote()
             candidates.append((model, metrics["last_served_time"]))
+
         # Remove the least recently used model
-        victim = min(candidates, key=lambda x: x[1])[0]
+        candidates.sort(key=lambda x: x[1])
+        num_gpus_to_release = 0
+        for candidate in candidates:
+            victims.append(candidate[0])
+            num_gpus_to_release += candidate[0].used_gpus
+            if num_gpus_to_release >= required_gpus:
+                break
         # TODO: do we need to wait here for a while?
-        return victim
+        return victims
 
     async def handle_unavailable_model(self, model_name: str) -> None:
         """
@@ -335,49 +358,10 @@ class ModelController:
                 # If there is an available GPU, load the model.
                 return self._load_or_replace_model(model)
             # If there is no available GPU, evict a model from GPU and load the requested model.
-            victim: _ModelContext = await self._select_victim(
+            victims: list[_ModelContext] = await self._select_victim(
                 model, model.gpus_per_replica
             )
-            return self._load_or_replace_model(model, victim)
-
-    """
-    OpenAI-ish API endpoints
-    """
-
-    @main_app.get("/health")
-    async def health(self) -> Response:
-        """Health check."""
-        return Response(status_code=200)
-
-    @main_app.get("/v1/models")
-    async def show_available_models(self):
-        def model_dump(models: list[dict]):
-            for model in self._model_pool.values():
-                model_info: dict = {
-                    "id": model.model_name,
-                    "object": "model",
-                    "created": model.created_time,
-                    "owned_by": "NCSA",
-                }
-                models.append(model_info)
-
-        models = []
-        model_dump(models)
-        return {"object": "list", "data": models}
-
-    @main_app.post("/v1/chat/completions")
-    async def create_chat_completion(
-        self, request: ChatCompletionRequest, raw_request: Request
-    ):
-        if request.model in self._model_pool:
-            self._logger.info(f"Model {request.model} found.")
-            return "Model found."
-        else:
-            return ErrorResponse(
-                message=f"The model `{request.model}` does not exist.",
-                type="NotFoundError",
-                code=404,
-            )
+            return self._load_or_replace_model(model, victims)
 
     """
     Admin API endpoints
@@ -411,6 +395,71 @@ class ModelController:
             return f"Config dumped to {request.config_dump_path}"
         else:
             return "Invalid mode. Aborting."
+
+    """
+    OpenAI-ish API endpoints
+    """
+
+    @main_app.get("/health")
+    async def health(self) -> Response:
+        """Health check."""
+        return Response(status_code=200)
+
+    @main_app.get("/v1/models")
+    async def show_available_models(self):
+        def model_dump(models: list[dict]):
+            for model in self._model_pool.values():
+                model_info: dict = {
+                    "id": model.model_name,
+                    "object": "model",
+                    "created": model.created_time,
+                    "owned_by": "NCSA",
+                }
+                models.append(model_info)
+
+        models = []
+        model_dump(models)
+        return {"object": "list", "data": models}
+
+    @main_app.post("/v1/chat/completions")
+    async def create_chat_completion(
+        self, request: ChatCompletionRequest, raw_request: Request
+    ):
+        model_context: _ModelContext = await self._get_or_register_model(
+            model_name=request.model,
+            model_type=_ModelType.VLLM_OPENAI,
+            gpus_per_replica=1,
+        )
+        retry = 0
+        while retry < 3:
+            try:
+                response = await model_context.app_handle.create_chat_completion.remote(
+                    request, FakeRequest()
+                )
+                return response
+            except RayServeException:
+                retry += 1
+                await asyncio.sleep(0.3)
+        raise RayServeException("Service unavailable. Please try again later.")
+
+    @main_app.post("/v1/completions")
+    async def create_completion(self, request: CompletionRequest, raw_request: Request):
+        model_context: _ModelContext = await self._get_or_register_model(
+            model_name=request.model,
+            model_type=_ModelType.VLLM_OPENAI,
+            gpus_per_replica=1,
+        )
+        retry = 0
+        while retry < 3:
+            try:
+                response = await model_context.app_handle.create_completion.remote(
+                    request, FakeRequest()
+                )
+                return response
+            except RayServeException:
+                retry += 1
+                await asyncio.sleep(0.3)
+        raise RayServeException("Service unavailable. Please try again later.")
 
 
 class ControllerArgs(BaseModel):

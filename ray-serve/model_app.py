@@ -4,6 +4,13 @@ from pydantic import BaseModel
 
 class ModelAppInterface(ABC):
     @abstractmethod
+    async def _ensure_model_active(self) -> None:
+        """
+        This method should be called before serving a request. It ensures that the model is active and ready to serve requests. If the model is inactive, it should raise an exception.
+        """
+        pass
+
+    @abstractmethod
     def reconfigure(self, config: dict) -> None:
         """
         This method is called when the model is being reconfigured via "user_config" in the config yaml file. Refer to Ray documentation for more details.

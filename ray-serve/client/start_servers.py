@@ -16,6 +16,8 @@ models = [
     "facebook/opt-13b",
     "gpt2-xl",
     "meta-llama/Llama-2-7b-chat-hf",
+    "gpt2-xl",
+    "gpt2",
 ]
 requests_data = [
     {
