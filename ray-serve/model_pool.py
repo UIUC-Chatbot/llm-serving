@@ -55,15 +55,23 @@ class _ModelContext:
         self.created_time: int = int(time.time())
         self.gpus_per_replica: int = gpus_per_replica
         self.used_gpus: int = 0
-        self._is_healthy: bool
+        self._is_healthy: bool = False
+        self._health_checked: bool = False
 
-    async def init_handle(self) -> bool:
+    def health_reset(self) -> None:
+        self._is_healthy = False
+        self._health_checked = False
+
+    async def check_health(self) -> bool:
         """
         Initialize the app handle to the serve app. This function should be called only by the
         function who creates the app.
         Note that app updates via config file are async, so we might need to wait for a while before
         the app is actually created.
         """
+        if self._health_checked:
+            return self._is_healthy
+
         while True:
             app_status = serve.status().applications[self.app_name].status
             if app_status == "RUNNING":
@@ -74,6 +82,7 @@ class _ModelContext:
                 self._is_healthy = False
                 break
             await asyncio.sleep(1)
+        self._health_checked = True
         return self._is_healthy
 
     def get_error_message(self) -> str:
@@ -257,6 +266,25 @@ class ModelController:
             used_gpus += self._model_pool[model_name].used_gpus
         return self._num_gpus >= used_gpus + required_gpus
 
+    async def _check_model_health(self, model: _ModelContext) -> bool:
+        """
+        Check if the model is healthy. If the model is unhealthy, remove it from the model pool.
+        Return True if the model is healthy, False otherwise.
+        This function should be called before calling a model app handle.
+        """
+        is_healthy = await model.check_health()
+        if is_healthy:
+            return True
+        else:
+            async with self._lock:
+                if model.model_name in self._model_pool:
+                    self._model_pool.pop(model.model_name)
+                    self._model_unsupported[model.model_name] = (
+                        model.get_error_message()
+                    )
+                    self._config_writer.remove_app(model)
+            return False
+
     async def _get_or_register_model(
         self, model_name: str, model_type: _ModelType, gpus_per_replica: int
     ) -> _ModelContext | None:
@@ -266,7 +294,10 @@ class ModelController:
         Return None if model deployment fails.
         """
         if model_name in self._model_pool:
-            return self._model_pool[model_name]
+            if await self._check_model_health(self._model_pool[model_name]):
+                return self._model_pool[model_name]
+            else:
+                return None
 
         if model_name in self._model_unsupported:
             return None
@@ -297,7 +328,8 @@ class ModelController:
                 self._config_writer.add_app(model=model_context, is_active=False)
 
             # Initialize the app handle and get the app status
-            if await model_context.init_handle():
+            model_context.health_reset()
+            if await model_context.check_health():
                 self._model_pool[model_name] = model_context
                 return model_context
             else:
@@ -330,8 +362,10 @@ class ModelController:
             for model_out in models_out:
                 self._config_writer.deactivate_app(model_out)
                 model_out.used_gpus = 0
+                model_out.health_reset()
         self._config_writer.activate_app(model_in)
         model_in.used_gpus = model_in.gpus_per_replica
+        model_in.health_reset()
 
     async def _select_victim(
         self, initiator: _ModelContext, required_gpus: int
@@ -446,18 +480,19 @@ class ModelController:
     async def create_chat_completion(
         self, request: ChatCompletionRequest, raw_request: Request
     ):
-        model_context = await self._get_or_register_model(
-            model_name=request.model,
-            model_type=_ModelType.VLLM_OPENAI,
-            gpus_per_replica=1,
-        )
-        if model_context is None:
-            return JSONResponse(
-                content=self._model_unsupported[request.model], status_code=400
-            )
         retry = 0
         while retry < 3:
             try:
+                model_context = await self._get_or_register_model(
+                    model_name=request.model,
+                    model_type=_ModelType.VLLM_OPENAI,
+                    gpus_per_replica=1,
+                )
+                if model_context is None:
+                    return JSONResponse(
+                        content=self._model_unsupported[request.model], status_code=400
+                    )
+
                 response = await model_context.app_handle.create_chat_completion.remote(
                     request, FakeRequest()
                 )
@@ -469,18 +504,19 @@ class ModelController:
 
     @main_app.post("/v1/completions")
     async def create_completion(self, request: CompletionRequest, raw_request: Request):
-        model_context = await self._get_or_register_model(
-            model_name=request.model,
-            model_type=_ModelType.VLLM_OPENAI,
-            gpus_per_replica=1,
-        )
-        if model_context is None:
-            return JSONResponse(
-                content=self._model_unsupported[request.model], status_code=400
-            )
         retry = 0
         while retry < 3:
             try:
+                model_context = await self._get_or_register_model(
+                    model_name=request.model,
+                    model_type=_ModelType.VLLM_OPENAI,
+                    gpus_per_replica=1,
+                )
+                if model_context is None:
+                    return JSONResponse(
+                        content=self._model_unsupported[request.model], status_code=400
+                    )
+
                 response = await model_context.app_handle.create_completion.remote(
                     request, FakeRequest()
                 )
