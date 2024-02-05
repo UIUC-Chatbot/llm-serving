@@ -111,7 +111,15 @@ def parse_args(model_name: str):
     parser = AsyncEngineArgs.add_cli_args(parser)
     # Important! Do not pass values from command line! This conflicts with Ray for whatever reason.
     # Pass values in the script and save you the headache.
-    return parser.parse_args(["--served-model-name", model_name, "--model", model_name])
+    return parser.parse_args(
+        [
+            "--served-model-name",
+            model_name,
+            "--model",
+            model_name,
+            "--trust-remote-code",
+        ]
+    )
 
 
 app = fastapi.FastAPI()
