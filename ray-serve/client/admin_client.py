@@ -5,7 +5,7 @@ parser = argparse.ArgumentParser(description="LLM Serving Admin Client")
 parser.add_argument("--key", help="Admin Key", type=str, default="IloveRocknRoll")
 parser.add_argument(
     "--mode",
-    help="0: get model route; 1: delete model; 2: dump config",
+    help="0: get model route; 1: delete model; 2: dump config; 3 : reset",
     type=int,
     required=True,
 )
@@ -52,6 +52,15 @@ elif args.mode == 2:
         "mode": "dump_config",
         "model_name": args.model_name,
         "config_dump_path": args.config_dump_path,
+    }
+    response = requests.post(f"http://{args.endpoint}", json=data)
+    print(response.text)
+elif args.mode == 3:
+    print("Resetting LLM service")
+    data = {
+        "key": "IloveRocknRoll",
+        "mode": "reset",
+        "model_name": args.model_name,
     }
     response = requests.post(f"http://{args.endpoint}", json=data)
     print(response.text)
