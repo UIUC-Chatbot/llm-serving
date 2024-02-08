@@ -1,11 +1,12 @@
 import argparse
+import pprint
 import requests
 
 parser = argparse.ArgumentParser(description="LLM Serving Admin Client")
 parser.add_argument("--key", help="Admin Key", type=str, default="IloveRocknRoll")
 parser.add_argument(
     "--mode",
-    help="0: get model route; 1: delete model; 2: dump config; 3 : reset",
+    help="0: get model route; 1: delete model; 2: list models; 3: dump config; 4: reset",
     type=int,
     required=True,
 )
@@ -36,6 +37,7 @@ if args.mode == 0:
     response = requests.post(f"http://{args.endpoint}", json=data)
     output_text = response.text
     print(output_text)
+
 elif args.mode == 1:
     print(f"Deleting model {args.model_name}")
     data = {
@@ -45,24 +47,38 @@ elif args.mode == 1:
     }
     response = requests.post(f"http://{args.endpoint}", json=data)
     print(response.text)
+
 elif args.mode == 2:
+    print("Listing all models")
+    data = {
+        "key": "IloveRocknRoll",
+        "mode": "list",
+    }
+    response = requests.post(f"http://{args.endpoint}", json=data)
+    response = response.json()
+    print(f"\nModel Pool: {len(response['model_pool'])}")
+    pprint.pprint(response["model_pool"])
+    print(f"\nUnsupported Models: {len(response['model_unsupported'])}")
+    pprint.pprint(response["model_unsupported"])
+
+elif args.mode == 3:
     print("Dumping config to file")
     data = {
         "key": "IloveRocknRoll",
         "mode": "dump_config",
-        "model_name": args.model_name,
         "config_dump_path": args.config_dump_path,
     }
     response = requests.post(f"http://{args.endpoint}", json=data)
     print(response.text)
-elif args.mode == 3:
+
+elif args.mode == 4:
     print("Resetting LLM service")
     data = {
         "key": "IloveRocknRoll",
         "mode": "reset",
-        "model_name": args.model_name,
     }
     response = requests.post(f"http://{args.endpoint}", json=data)
     print(response.text)
+
 else:
     print("Invalid mode")

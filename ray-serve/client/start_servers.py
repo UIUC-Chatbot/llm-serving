@@ -1,5 +1,6 @@
 import asyncio
 from aiohttp import ClientSession
+import numpy as np
 
 
 async def send_post_request(session: ClientSession, endpoint: str, data: dict):
@@ -10,24 +11,33 @@ async def send_post_request(session: ClientSession, endpoint: str, data: dict):
         return response_text
 
 
-endpoint = "http://127.0.0.1:8000/llm/admin"
+endpoint = "http://127.0.0.1:5004/llm/admin"
+
 models = [
-    "meta-llama/Llama-2-7b-chat-hf",
+    "baichuan-inc/Baichuan-7B",
+    "EleutherAI/gpt-j-6b",
+    "EleutherAI/pythia-12b",
     "facebook/opt-13b",
     "gpt2-xl",
     "meta-llama/Llama-2-7b-chat-hf",
-    "gpt2-xl",
-    "gpt2",
+    "Qwen/Qwen-7B-Chat",
+    "THUDM/chatglm2-6b",
+    "THUDM/chatglm3-6b",
 ]
-requests_data = [
-    {
-        "key": "IloveRocknRoll",
-        "mode": "get",
-        "model_name": model,
-        "model_type": "vllm_openai",
-    }
-    for model in models
-]
+
+
+requests_data = []
+for i in range(100):
+    model_index = np.random.randint(0, len(models))
+    requests_data.append(
+        {
+            "key": "IloveRocknRoll",
+            "mode": "get",
+            "model_name": models[model_index],
+            "model_type": "vllm_openai",
+        }
+    )
+
 
 print("Starting servers...")
 

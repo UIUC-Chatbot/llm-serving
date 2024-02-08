@@ -4,23 +4,27 @@ from pydantic import BaseModel
 
 class ModelAppInterface(ABC):
     @abstractmethod
-    async def _ensure_model_active(self) -> None:
+    async def _check_model_availability(self) -> bool:
         """
-        This method should be called before serving a request. It ensures that the model is active and ready to serve requests. If the model is inactive, it should raise an exception.
+        This method should be called before serving a request. It checks whether the model is
+        active and ready to serve requests. If the model is inactive, it should call the
+        ModelController.
         """
         pass
 
     @abstractmethod
     def reconfigure(self, config: dict) -> None:
         """
-        This method is called when the model is being reconfigured via "user_config" in the config yaml file. Refer to Ray documentation for more details.
+        This method is called when the model is being reconfigured via "user_config" in the config
+        yaml file. Refer to Ray documentation for more details.
         """
         pass
 
     @abstractmethod
     def collect_eviction_defense_metrics(self) -> dict:
         """
-        This method is called when the ModelController is trying to evict a model from GPU. It returns metrics that justify the model's continued operation on GPU.
+        This method is called when the ModelController is trying to evict a model from GPU. It
+        returns metrics that justify the model's continued operation on GPU.
         """
         pass
 

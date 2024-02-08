@@ -33,7 +33,7 @@ Architecture:
 class _AdminRequest(BaseModel):
     key: str
     mode: str
-    model_name: str
+    model_name: str = "meta-llama/Llama-2-7b-chat-hf"
     model_type: str = "vllm_openai"
     gpus_per_replica: int = 1
     config_dump_path: str = "latest_config.yaml"
@@ -65,7 +65,11 @@ class ModelController:
         self._num_gpus: int = min(num_gpus, ray.cluster_resources().get("GPU", 0))
         self._num_served_models: int = 0
 
-        # Lock required for modifying model_pool and model_unsupported, i.e., updating serve apps
+        """
+        The modification of the model pool should be atomic.
+        If some coroutines need to modify the model pool and execute await statements during the
+        modification process (yield control to the event loop), they must acquire the lock.
+        """
         self._lock: asyncio.Lock = asyncio.Lock()
 
     def _has_available_gpu(self, required_gpus: int) -> bool:
@@ -77,53 +81,46 @@ class ModelController:
             used_gpus += self._model_pool[model_name].used_gpus
         return self._num_gpus >= used_gpus + required_gpus
 
-    async def _check_model_health(self, model: ModelContext) -> bool:
+    async def _get_healthy_model(self, model: ModelContext) -> ModelContext | None:
         """
         Check if the model is healthy. If the model is unhealthy, remove it from the model pool.
-        Return True if the model is healthy, False otherwise.
+        Return model context if the model is healthy, None otherwise.
         This function should be called before calling a model app handle.
         """
         is_healthy = await model.check_health()
         if is_healthy:
-            return True
+            return model
         else:
             async with self._lock:
-                if model.model_name in self._model_pool:
-                    self._model_pool.pop(model.model_name)
-                    self._model_unsupported[model.model_name] = (
-                        model.get_error_message()
-                    )
-                    self._config_writer.remove_app(model)
-            return False
+                if model.model_name not in self._model_pool:
+                    return None
+                self._config_writer.remove_app(model)
+                self._model_pool.pop(model.model_name)
+                self._model_unsupported[model.model_name] = model.get_error_message()
+                self._logger.warning(f"Model {model.model_name} was unhealthy.")
+                return None
 
     async def _get_or_register_model(
         self, model_name: str, model_type: ModelType, gpus_per_replica: int
     ) -> ModelContext | None:
         """
-        Return the model_context of the requested model. Create a serve app for the model if it's
-        not created yet.
-        Return None if model deployment fails.
+        Return a healthy model_context of the requested model. Create a serve app for the model
+        if it's not created yet.
+        Return None if model deployment is unhealthy.
         """
         if model_name in self._model_pool:
-            if await self._check_model_health(self._model_pool[model_name]):
-                return self._model_pool[model_name]
-            else:
-                return None
+            return await self._get_healthy_model(self._model_pool[model_name])
 
-        if model_name in self._model_unsupported:
-            return None
-
-        if gpus_per_replica > self._num_gpus:
+        if model_name in self._model_unsupported or gpus_per_replica > self._num_gpus:
             return None
 
         async with self._lock:
+            # Check again because someone else might have added the model before we woke up.
             if model_name in self._model_pool:
-                return self._model_pool[model_name]
-            if model_name in self._model_unsupported:
-                return None
+                return await self._get_healthy_model(self._model_pool[model_name])
 
             # Create a new serve app for the requested model
-            model_context = ModelContext(
+            model = ModelContext(
                 app_name=model_name.replace("/", "---"),
                 model_name=model_name,
                 route_prefix=f"/model-{self._num_served_models}",
@@ -132,21 +129,15 @@ class ModelController:
             )
             self._num_served_models += 1
             if self._has_available_gpu(gpus_per_replica):
-                model_context.used_gpus = gpus_per_replica
-                self._config_writer.add_app(model=model_context, is_active=True)
+                model.used_gpus = gpus_per_replica
+                self._config_writer.add_app(model=model, is_active=True)
             else:
-                model_context.used_gpus = 0
-                self._config_writer.add_app(model=model_context, is_active=False)
+                model.used_gpus = 0
+                self._config_writer.add_app(model=model, is_active=False)
+            model.health_reset()
+            self._model_pool[model_name] = model
 
-            # Initialize the app handle and get the app status
-            model_context.health_reset()
-            if await model_context.check_health():
-                self._model_pool[model_name] = model_context
-                return model_context
-            else:
-                self._model_unsupported[model_name] = model_context.get_error_message()
-                self._config_writer.remove_app(model=model_context)
-                return None
+        return await self._get_healthy_model(model)
 
     async def _delete_model(self, model_name: str) -> bool:
         """
@@ -154,7 +145,7 @@ class ModelController:
         """
         async with self._lock:
             if model_name in self._model_pool:
-                self._config_writer.remove_app(model=self._model_pool[model_name])
+                self._config_writer.remove_app(self._model_pool[model_name])
                 self._model_pool.pop(model_name)
                 return True
             else:
@@ -181,17 +172,19 @@ class ModelController:
         resources, nor does it check for the availability of any GPU.
         """
         if models_out is not None:
+            self._config_writer.deactivate_apps(models_out)
             for model_out in models_out:
-                self._config_writer.deactivate_app(model_out)
                 model_out.used_gpus = 0
                 model_out.health_reset()
+                asyncio.create_task(self._get_healthy_model(model_out))
         self._config_writer.activate_app(model_in)
         model_in.used_gpus = model_in.gpus_per_replica
         model_in.health_reset()
+        asyncio.create_task(self._get_healthy_model(model_in))
 
     async def _select_victim(
         self, initiator: ModelContext, required_gpus: int
-    ) -> list[ModelContext]:
+    ) -> list[ModelContext] | None:
         """
         The initiator model has requested to load itself into GPU. However, there is no available
         GPU. This function selects a victim model to evict from GPU.
@@ -205,7 +198,7 @@ class ModelController:
                 metrics = (
                     await model.app_handle.collect_eviction_defense_metrics.remote()
                 )
-            except RayServeException:
+            except (AttributeError, RayServeException):
                 continue
             candidates.append((model, metrics["last_served_time"]))
 
@@ -217,35 +210,43 @@ class ModelController:
             num_gpus_to_release += candidate[0].used_gpus
             if num_gpus_to_release >= required_gpus:
                 break
+
         # TODO: do we need to wait here for a while? What if the victims don't fulfill the requirement?
-        return victims
+        if num_gpus_to_release < required_gpus:
+            return None
+        else:
+            return victims
 
     async def handle_unavailable_model(self, model_name: str) -> None:
         """
         This function is called by an inactive ModelApp who wants to load itself into GPU.
         """
         model = self._model_pool[model_name]
+        if model.used_gpus > 0:
+            return  # If the model is already loaded, ignore this request.
+        if self._has_available_gpu(model.gpus_per_replica):
+            return self._load_or_replace_model(model)
+
+        # If there is no available GPU, evict a model from GPU and load the requested model.
         async with self._lock:
-            if model.used_gpus > 0:
-                return  # If the model is already loaded, ignore this request.
-            if self._has_available_gpu(model.gpus_per_replica):
-                # If there is an available GPU, load the model.
-                return self._load_or_replace_model(model)
-            # If there is no available GPU, evict a model from GPU and load the requested model.
-            victims: list[ModelContext] = await self._select_victim(
+            victims: list[ModelContext] | None = await self._select_victim(
                 model, model.gpus_per_replica
             )
-            return self._load_or_replace_model(model, victims)
+            if victims is None:
+                return
+            else:
+                return self._load_or_replace_model(model, victims)
 
     """
     Admin API endpoints
     """
 
     @main_app.post("/admin")
-    async def admin_call(self, request: _AdminRequest) -> str:
+    async def admin_call(self, request: _AdminRequest):
         # TODO: the key is currently visible on GitHub. We need to change this.
         if request.key != "IloveRocknRoll":
             return "Permission denied. Aborting."
+
         if request.mode == "get":
             if request.model_type == "vllm_raw":
                 model_type = ModelType.VLLM_RAW
@@ -253,26 +254,54 @@ class ModelController:
                 model_type = ModelType.VLLM_OPENAI
             else:
                 return "Invalid model type. Aborting."
-            model_context = await self._get_or_register_model(
+            model = await self._get_or_register_model(
                 model_name=request.model_name,
                 model_type=model_type,
                 gpus_per_replica=request.gpus_per_replica,
             )
-            if model_context is not None:
-                return f"Model {model_context.model_name} endpoint: {model_context.route_prefix}"
+            if model is not None:
+                return f"Model {model.model_name} endpoint: {model.route_prefix}"
             else:
                 return f"Model {request.model_name} not supported: {self._model_unsupported[request.model_name]}"
+
         elif request.mode == "delete":
             if await self._delete_model(request.model_name):
                 return f"Model {request.model_name} deleted."
             else:
                 return f"Model {request.model_name} not found."
+
+        elif request.mode == "list":
+            dump_model_pool = []
+            for model in self._model_pool.values():
+                dump_model_pool.append(
+                    {
+                        "model_name": model.model_name,
+                        "model_type": model.model_type,
+                        "route_prefix": model.route_prefix,
+                        "gpus_per_replica": model.gpus_per_replica,
+                        "used_gpus": model.used_gpus,
+                    }
+                )
+
+            dump_model_unsupported = []
+            for model_name, error_message in self._model_unsupported.items():
+                dump_model_unsupported.append(
+                    {"model_name": model_name, "error_message": error_message}
+                )
+
+            return {
+                "model_pool": dump_model_pool,
+                "model_unsupported": dump_model_unsupported,
+            }
+
         elif request.mode == "dump_config":
             self._config_writer.dump_config(request.config_dump_path)
             return f"Config dumped to {request.config_dump_path}"
+
         elif request.mode == "reset":
             await self._reset()
             return "LLM service reset."
+
         else:
             return "Invalid mode. Aborting."
 
@@ -306,50 +335,48 @@ class ModelController:
         self, request: ChatCompletionRequest, raw_request: Request
     ):
         retry = 0
-        while retry < 3:
-            try:
-                model_context = await self._get_or_register_model(
-                    model_name=request.model,
-                    model_type=ModelType.VLLM_OPENAI,
-                    gpus_per_replica=1,
+        while retry < 5:
+            model = await self._get_or_register_model(
+                model_name=request.model,
+                model_type=ModelType.VLLM_OPENAI,
+                gpus_per_replica=1,
+            )
+            if model is None:
+                return JSONResponse(
+                    content=self._model_unsupported[request.model], status_code=400
                 )
-                if model_context is None:
-                    return JSONResponse(
-                        content=self._model_unsupported[request.model], status_code=400
-                    )
 
-                response = await model_context.app_handle.create_chat_completion.remote(
-                    request, _FakeRequest()
-                )
+            response = await model.app_handle.create_chat_completion.remote(
+                request, _FakeRequest()
+            )
+            if response.status_code != 503:
                 return response
-            except RayServeException:
-                retry += 1
-                await asyncio.sleep(0.3)
-        raise RayServeException("Service unavailable. Please try again later.")
+            retry += 1
+            await asyncio.sleep(0.3)
+        return JSONResponse(content="Model Not Available", status_code=503)
 
     @main_app.post("/v1/completions")
     async def create_completion(self, request: CompletionRequest, raw_request: Request):
         retry = 0
-        while retry < 3:
-            try:
-                model_context = await self._get_or_register_model(
-                    model_name=request.model,
-                    model_type=ModelType.VLLM_OPENAI,
-                    gpus_per_replica=1,
+        while retry < 5:
+            model = await self._get_or_register_model(
+                model_name=request.model,
+                model_type=ModelType.VLLM_OPENAI,
+                gpus_per_replica=1,
+            )
+            if model is None:
+                return JSONResponse(
+                    content=self._model_unsupported[request.model], status_code=400
                 )
-                if model_context is None:
-                    return JSONResponse(
-                        content=self._model_unsupported[request.model], status_code=400
-                    )
 
-                response = await model_context.app_handle.create_completion.remote(
-                    request, _FakeRequest()
-                )
+            response = await model.app_handle.create_completion.remote(
+                request, _FakeRequest()
+            )
+            if response.status_code != 503:
                 return response
-            except RayServeException:
-                retry += 1
-                await asyncio.sleep(0.3)
-        raise RayServeException("Service unavailable. Please try again later.")
+            retry += 1
+            await asyncio.sleep(0.3)
+        return JSONResponse(content="Model Not Available", status_code=503)
 
 
 class _ControllerArgs(BaseModel):

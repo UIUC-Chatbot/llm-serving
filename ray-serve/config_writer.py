@@ -32,9 +32,23 @@ class ConfigWriter:
         dashboard, which then updates the serve apps and deployments. The call is async; it
         returns immediately without waiting for the dashboard to finish the update.
         """
-        ServeDeploySchema.parse_obj(self._config)
-        address: str = os.environ.get("RAY_DASHBOARD_ADDRESS", "http://localhost:8265")
-        ServeSubmissionClient(address).deploy_applications(self._config)
+        try:
+            ServeDeploySchema.parse_obj(self._config)
+            address: str = os.environ.get(
+                "RAY_DASHBOARD_ADDRESS", "http://localhost:8265"
+            )
+            ServeSubmissionClient(address).deploy_applications(self._config)
+        except Exception as e:
+            self._logger.error(f"Error applying config: {e}")
+            app_set = set()
+            deduplicated_apps = []
+            for app in self._apps:
+                if app.get("name") not in app_set:
+                    app_set.add(app["name"])
+                    deduplicated_apps.append(app)
+            self._config["applications"] = deduplicated_apps
+            self._apps = self._config["applications"]
+            self._logger.info("Config file deduplicated.")
 
     def add_app(self, model: ModelContext, is_active: bool) -> None:
         # import_path is the path to the actual model implementation.
@@ -45,12 +59,14 @@ class ConfigWriter:
         else:
             raise ValueError("Invalid model type.")
 
-        # VLLM supports distributed inference via Ray. However, this seems to conflict with
-        # Ray serve if we explicitly specify num_gpus of that deployment. For now, we just set
-        # tensor_parallel_size to the required number and trust VLLM and Ray will do their
-        # jobs.
-        # For models that don't use distributed inference, we must specify num_gpus == 1. Otherwise,
-        # Ray serve will not allocate GPU resources to the deployment.
+        """
+        VLLM supports distributed inference via Ray. However, this seems to conflict with
+        Ray serve if we explicitly specify num_gpus of that deployment. For now, we just set
+        tensor_parallel_size to the required number and trust VLLM and Ray will do their
+        jobs.
+        For models that don't use distributed inference, we must specify num_gpus == 1. Otherwise,
+        Ray serve will not allocate GPU resources to the deployment.
+        """
         if model.gpus_per_replica == 1:
             deployments = [
                 {
@@ -107,34 +123,37 @@ class ConfigWriter:
         self._logger.info(f"Apps: {names_model_to_evict} removed.")
 
     def activate_app(self, model: ModelContext) -> None:
-        app = next(
-            (d for d in self._apps if d.get("name") == model.app_name),
-            None,
-        )
-        if app is None:
-            raise ValueError(f"App {model.app_name} not found.")
-        app["deployments"][0]["user_config"]["is_active"] = True
-        if model.gpus_per_replica == 1:
-            app["deployments"][0]["ray_actor_options"]["num_gpus"] = 1
-        else:
-            # Distributed inference shouldn't use num_gpus, see comments in _add_app() for details.
-            app["deployments"][0]["ray_actor_options"].pop("num_gpus", None)
+        for app in self._apps:
+            if app.get("name") == model.app_name:
+                app["deployments"][0]["user_config"]["is_active"] = True
+                if model.gpus_per_replica == 1:
+                    app["deployments"][0]["ray_actor_options"]["num_gpus"] = 1
+                else:
+                    # Distributed inference shouldn't use num_gpus, see comments in _add_app()
+                    # for details.
+                    app["deployments"][0]["ray_actor_options"].pop("num_gpus", None)
 
         self._apply_config()
         self._logger.info(f"App: {model.app_name} activated.")
 
     def deactivate_app(self, model: ModelContext) -> None:
-        app = next(
-            (d for d in self._apps if d.get("name") == model.app_name),
-            None,
-        )
-        if app is None:
-            raise ValueError(f"App {model.app_name} not found.")
-        app["deployments"][0]["user_config"]["is_active"] = False
-        app["deployments"][0]["ray_actor_options"]["num_gpus"] = 0
+        for app in self._apps:
+            if app.get("name") == model.app_name:
+                app["deployments"][0]["user_config"]["is_active"] = False
+                app["deployments"][0]["ray_actor_options"]["num_gpus"] = 0
 
         self._apply_config()
         self._logger.info(f"App: {model.app_name} deactivated.")
+
+    def deactivate_apps(self, models: list[ModelContext]) -> None:
+        names_model_to_deactivate = [model.app_name for model in models]
+        for app in self._apps:
+            if app.get("name") in names_model_to_deactivate:
+                app["deployments"][0]["user_config"]["is_active"] = False
+                app["deployments"][0]["ray_actor_options"]["num_gpus"] = 0
+
+        self._apply_config()
+        self._logger.info(f"Apps: {names_model_to_deactivate} deactivated.")
 
     def dump_config(self, file_path: str) -> None:
         with open(file_path, "w") as file:

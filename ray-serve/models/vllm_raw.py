@@ -34,20 +34,16 @@ class ModelApp(ModelAppInterface):
         self._last_served_time = time.time()
         self._sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 
-    async def _ensure_model_active(self) -> None:
-        """
-        This method should be called before serving a request. It ensures that the model is active and ready to serve requests.
-        """
+    async def _check_model_availability(self) -> bool:
         if self._is_active:
-            return
+            return True
         await self._controller_app.handle_unavailable_model.remote(self._model_name)
-        raise RayServeException(
-            f"Model {self._model_name} is inactive. Service is restoring. Please try again later."
-        )
+        return False
 
     @app.post("/")
     async def call(self, request: UserRequest) -> str | list[str]:
-        await self._ensure_model_active()
+        if not await self._check_model_availability():
+            return "Model is not active"
         self._last_served_time = time.time()
         input_data: list[str] = [request.prompt]
         outputs = []

@@ -37,8 +37,7 @@ class ModelContext:
 
     async def check_health(self) -> bool:
         """
-        Initialize the app handle to the serve app. This function should be called only by the
-        function who creates the app.
+        Get the app handle to the serve app and check for its health.
         Note that app updates via config file are async, so we might need to wait for a while before
         the app is actually created.
         """
@@ -51,7 +50,7 @@ class ModelContext:
                 self.app_handle = serve.get_app_handle(self.app_name)
                 self._is_healthy = True
                 break
-            elif app_status == "DEPLOY_FAILED":
+            elif app_status == "DEPLOY_FAILED" or app_status == "DELETING":
                 self._is_healthy = False
                 break
             await asyncio.sleep(1)
