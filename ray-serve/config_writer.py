@@ -4,7 +4,7 @@ from ray.dashboard.modules.serve.sdk import ServeSubmissionClient
 from ray.serve.schema import ServeDeploySchema
 import yaml
 
-from model_context import ModelContext, ModelType
+from model_context import ModelContext, ModelPath, ModelType
 
 
 class ConfigWriter:
@@ -51,13 +51,8 @@ class ConfigWriter:
             self._logger.info("Config file deduplicated.")
 
     def add_app(self, model: ModelContext, is_active: bool) -> None:
-        # import_path is the path to the actual model implementation.
-        if model.model_type == ModelType.VLLM_RAW:
-            import_path = "models.vllm_raw:app_builder"
-        elif model.model_type == ModelType.VLLM_OPENAI:
-            import_path = "models.vllm_openai.openai_server:app_builder"
-        else:
-            raise ValueError("Invalid model type.")
+        # import_path is the path to the model implementation file.
+        import_path: str = ModelPath.get_import_path(model.model_type)
 
         """
         VLLM supports distributed inference via Ray. However, this seems to conflict with

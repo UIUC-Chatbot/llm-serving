@@ -1,13 +1,13 @@
 import asyncio
-from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, Response
+from fastapi import FastAPI
+from fastapi.responses import JSONResponse, StreamingResponse, Response
 from logging import getLogger, Logger
 from pydantic import BaseModel
 import ray
 from ray import serve
 from ray.serve import Application
 from ray.serve.exceptions import RayServeException
-from vllm.entrypoints.openai.protocol import CompletionRequest, ChatCompletionRequest
+from vllm.entrypoints.openai.protocol import ChatCompletionRequest
 
 
 from config_writer import ConfigWriter
@@ -37,18 +37,6 @@ class _AdminRequest(BaseModel):
     model_type: str = "vllm_openai"
     gpus_per_replica: int = 1
     config_dump_path: str = "latest_config.yaml"
-
-
-class _FakeRequest:
-    """
-    The ModelController routes user requests to their corresponding ModelApp. However, VLLM OpenAI
-    server uses starlette raw request object, which is not serializable. We need to create a fake
-    request object, which is serializable, to pass to the model.
-    As of vllm 0.3.0, they only uses is_disconnected() function.
-    """
-
-    async def is_disconnected(self):
-        return False
 
 
 main_app = FastAPI()
@@ -94,9 +82,9 @@ class ModelController:
             async with self._lock:
                 if model.model_name not in self._model_pool:
                     return None
+                self._model_unsupported[model.model_name] = model.get_error_message()
                 self._config_writer.remove_app(model)
                 self._model_pool.pop(model.model_name)
-                self._model_unsupported[model.model_name] = model.get_error_message()
                 self._logger.warning(f"Model {model.model_name} was unhealthy.")
                 return None
 
@@ -114,28 +102,26 @@ class ModelController:
         if model_name in self._model_unsupported or gpus_per_replica > self._num_gpus:
             return None
 
+        # Create a new serve app for the requested model
         async with self._lock:
             # Check again because someone else might have added the model before we woke up.
-            if model_name in self._model_pool:
-                return await self._get_healthy_model(self._model_pool[model_name])
-
-            # Create a new serve app for the requested model
-            model = ModelContext(
-                app_name=model_name.replace("/", "---"),
-                model_name=model_name,
-                route_prefix=f"/model-{self._num_served_models}",
-                model_type=model_type,
-                gpus_per_replica=gpus_per_replica,
-            )
-            self._num_served_models += 1
-            if self._has_available_gpu(gpus_per_replica):
-                model.used_gpus = gpus_per_replica
-                self._config_writer.add_app(model=model, is_active=True)
-            else:
-                model.used_gpus = 0
-                self._config_writer.add_app(model=model, is_active=False)
-            model.health_reset()
-            self._model_pool[model_name] = model
+            if model_name not in self._model_pool:
+                model = ModelContext(
+                    app_name=model_name.replace("/", "---"),
+                    model_name=model_name,
+                    route_prefix=f"/model-{self._num_served_models}",
+                    model_type=model_type,
+                    gpus_per_replica=gpus_per_replica,
+                )
+                self._num_served_models += 1
+                if self._has_available_gpu(gpus_per_replica):
+                    model.used_gpus = gpus_per_replica
+                    self._config_writer.add_app(model=model, is_active=True)
+                else:
+                    model.used_gpus = 0
+                    self._config_writer.add_app(model=model, is_active=False)
+                model.health_reset()
+                self._model_pool[model_name] = model
 
         return await self._get_healthy_model(model)
 
@@ -250,8 +236,10 @@ class ModelController:
         if request.mode == "get":
             if request.model_type == "vllm_raw":
                 model_type = ModelType.VLLM_RAW
-            elif request.model_type == "vllm_openai":
-                model_type = ModelType.VLLM_OPENAI
+            elif request.model_type == "vllm_openai_standalone":
+                model_type = ModelType.VLLM_OPENAI_STANDALONE
+            elif request.model_type == "vllm_openai_internal":
+                model_type = ModelType.VLLM_OPENAI_INTERNAL
             else:
                 return "Invalid model type. Aborting."
             model = await self._get_or_register_model(
@@ -331,14 +319,12 @@ class ModelController:
         return {"object": "list", "data": models}
 
     @main_app.post("/v1/chat/completions")
-    async def create_chat_completion(
-        self, request: ChatCompletionRequest, raw_request: Request
-    ):
+    async def create_chat_completion(self, request: ChatCompletionRequest):
         retry = 0
-        while retry < 5:
+        while retry < 3:
             model = await self._get_or_register_model(
                 model_name=request.model,
-                model_type=ModelType.VLLM_OPENAI,
+                model_type=ModelType.VLLM_OPENAI_INTERNAL,
                 gpus_per_replica=1,
             )
             if model is None:
@@ -346,36 +332,23 @@ class ModelController:
                     content=self._model_unsupported[request.model], status_code=400
                 )
 
-            response = await model.app_handle.create_chat_completion.remote(
-                request, _FakeRequest()
-            )
-            if response.status_code != 503:
-                return response
-            retry += 1
-            await asyncio.sleep(0.3)
-        return JSONResponse(content="Model Not Available", status_code=503)
+            try:
+                if request.stream:
+                    generator = model.app_handle.options(
+                        stream=True
+                    ).create_chat_completion_stream.remote(request)
+                    return StreamingResponse(
+                        content=generator, media_type="text/event-stream"
+                    )
 
-    @main_app.post("/v1/completions")
-    async def create_completion(self, request: CompletionRequest, raw_request: Request):
-        retry = 0
-        while retry < 5:
-            model = await self._get_or_register_model(
-                model_name=request.model,
-                model_type=ModelType.VLLM_OPENAI,
-                gpus_per_replica=1,
-            )
-            if model is None:
-                return JSONResponse(
-                    content=self._model_unsupported[request.model], status_code=400
-                )
-
-            response = await model.app_handle.create_completion.remote(
-                request, _FakeRequest()
-            )
-            if response.status_code != 503:
-                return response
-            retry += 1
-            await asyncio.sleep(0.3)
+                else:
+                    response = await model.app_handle.options(
+                        stream=False
+                    ).create_chat_completion_batch.remote(request)
+                    return JSONResponse(content=response)
+            except:
+                retry += 1
+                await asyncio.sleep(0.1)
         return JSONResponse(content="Model Not Available", status_code=503)
 
 

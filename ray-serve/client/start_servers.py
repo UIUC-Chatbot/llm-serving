@@ -1,6 +1,11 @@
+import argparse
 import asyncio
 from aiohttp import ClientSession
 import numpy as np
+
+parser = argparse.ArgumentParser(description="Getting Models Test")
+parser.add_argument("--endpoint", default="127.0.0.1:8000/llm/admin")
+args = parser.parse_args()
 
 
 async def send_post_request(session: ClientSession, endpoint: str, data: dict):
@@ -11,7 +16,7 @@ async def send_post_request(session: ClientSession, endpoint: str, data: dict):
         return response_text
 
 
-endpoint = "http://127.0.0.1:5004/llm/admin"
+endpoint = f"http://{args.endpoint}"
 
 models = [
     "baichuan-inc/Baichuan-7B",
@@ -34,7 +39,7 @@ for i in range(100):
             "key": "IloveRocknRoll",
             "mode": "get",
             "model_name": models[model_index],
-            "model_type": "vllm_openai",
+            "model_type": "vllm_openai_internal",
         }
     )
 

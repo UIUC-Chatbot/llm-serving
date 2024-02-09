@@ -28,7 +28,6 @@ from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
 
 from model_app import ModelAppInterface, ModelAppArgs
 from ray import serve
-from ray.serve.exceptions import RayServeException
 import time
 
 
@@ -211,6 +210,7 @@ class ModelApp(ModelAppInterface):
 
     async def _check_model_availability(self) -> bool:
         if self._is_active:
+            self._last_served_time = time.time()
             return True
         await self._controller_app.handle_unavailable_model.remote(self.served_model)
         return False
@@ -235,7 +235,9 @@ class ModelApp(ModelAppInterface):
         self, request: ChatCompletionRequest, raw_request: Request
     ):
         if not await self._check_model_availability():
-            return JSONResponse(content="Model Not Available", status_code=503)
+            return JSONResponse(
+                content="Model Not Available, please try again later.", status_code=503
+            )
 
         generator = await self.openai_serving_chat.create_chat_completion(
             request, raw_request
@@ -252,7 +254,9 @@ class ModelApp(ModelAppInterface):
     @app.post("/v1/completions")
     async def create_completion(self, request: CompletionRequest, raw_request: Request):
         if not await self._check_model_availability():
-            return JSONResponse(content="Model Not Available", status_code=503)
+            return JSONResponse(
+                content="Model Not Available, please try again later.", status_code=503
+            )
         generator = await self.openai_serving_completion.create_completion(
             request, raw_request
         )

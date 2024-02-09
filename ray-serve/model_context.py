@@ -7,7 +7,27 @@ import time
 
 class ModelType(Enum):
     VLLM_RAW = 1  # Raw VLLM model, created by llm = LLM(model="model_name")
-    VLLM_OPENAI = 2  # VLLM OpenAI-Compatible server
+    VLLM_OPENAI_STANDALONE = 2  # Standalone VLLM OpenAI-Compatible server
+    VLLM_OPENAI_INTERNAL = 3  # Internal VLLM OpenAI-Compatible server
+
+
+class ModelPath:
+    @staticmethod
+    def get_import_path(model_type: ModelType) -> str:
+        """
+        Return a path to the model implementation file.
+        """
+        if model_type == ModelType.VLLM_RAW:
+            return "models.vllm_raw:app_builder"
+
+        elif model_type == ModelType.VLLM_OPENAI_STANDALONE:
+            return "models.vllm_openai.openai_standalone:app_builder"
+
+        elif model_type == ModelType.VLLM_OPENAI_INTERNAL:
+            return "models.vllm_openai.openai_internal:app_builder"
+
+        else:
+            raise ValueError("Invalid model type.")
 
 
 class ModelContext:
@@ -58,6 +78,10 @@ class ModelContext:
         return self._is_healthy
 
     def get_error_message(self) -> str:
+        """
+        This function should be called when app deployment fails.
+        It returns the error message of the app deployment, and possibly stack traces.
+        """
         msg = (
             serve.status()
             .applications[self.app_name]
