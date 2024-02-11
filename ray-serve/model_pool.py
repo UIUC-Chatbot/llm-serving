@@ -108,7 +108,7 @@ class ModelController:
             # Check again because someone else might have added the model before we woke up.
             if model_name not in self._model_pool:
                 model = ModelContext(
-                    app_name=model_name.replace("/", "---"),
+                    app_name=f"{model_name.replace('/', '--')}--{self._num_served_models}",
                     model_name=model_name,
                     route_prefix=f"/model-{self._num_served_models}",
                     model_type=model_type,
