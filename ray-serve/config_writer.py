@@ -4,7 +4,7 @@ from ray.dashboard.modules.serve.sdk import ServeSubmissionClient
 from ray.serve.schema import ServeDeploySchema
 import yaml
 
-from model_context import ModelContext, ModelPath, ModelType
+from model_context import ModelContext, ModelPath
 
 
 class ConfigWriter:

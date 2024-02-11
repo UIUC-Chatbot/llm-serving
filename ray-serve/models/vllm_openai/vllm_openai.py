@@ -29,6 +29,7 @@ from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
 from model_app import ModelAppInterface, ModelAppArgs
 from ray import serve
 import time
+from typing import AsyncGenerator
 
 
 def parse_args(model_name: str):
@@ -124,6 +125,17 @@ def parse_args(model_name: str):
 app = fastapi.FastAPI()
 app.add_middleware(MetricsMiddleware)  # Trace HTTP server metrics
 app.add_route("/metrics", metrics)  # Exposes HTTP metrics
+
+
+class _FakeRequest:
+    """
+    VLLM OpenAI server uses starlette raw request object, which is not serializable. We need to
+    create a fake request object, which is serializable, to pass to the model.
+    As of vllm 0.3.0, they only uses is_disconnected() function.
+    """
+
+    async def is_disconnected(self):
+        return False
 
 
 @serve.deployment(name="ModelApp")
@@ -268,6 +280,31 @@ class ModelApp(ModelAppInterface):
             return StreamingResponse(content=generator, media_type="text/event-stream")
         else:
             return JSONResponse(content=generator.model_dump())
+
+    async def create_chat_completion_batch(
+        self, request: ChatCompletionRequest
+    ) -> tuple[bool, dict] | tuple[bool, None]:
+
+        if not await self._check_model_availability():
+            return False, None
+
+        response = await self.openai_serving_chat.create_chat_completion(
+            request, _FakeRequest()
+        )
+        return True, response.model_dump()
+
+    async def create_chat_completion_stream(
+        self, request: ChatCompletionRequest
+    ) -> AsyncGenerator:
+
+        if not await self._check_model_availability():
+            return
+
+        response = await self.openai_serving_chat.create_chat_completion(
+            request, _FakeRequest()
+        )
+        async for chunk in response:
+            yield chunk
 
 
 def app_builder(args: ModelAppArgs):

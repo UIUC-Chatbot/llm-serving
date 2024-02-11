@@ -39,7 +39,7 @@ for i in range(100):
             "key": "IloveRocknRoll",
             "mode": "get",
             "model_name": models[model_index],
-            "model_type": "vllm_openai_internal",
+            "model_type": "vllm_openai",
         }
     )
 

@@ -7,6 +7,7 @@ import ray
 from ray import serve
 from ray.serve import Application
 from ray.serve.exceptions import RayServeException
+from typing import AsyncGenerator
 from vllm.entrypoints.openai.protocol import ChatCompletionRequest
 
 
@@ -123,6 +124,9 @@ class ModelController:
                 model.health_reset()
                 self._model_pool[model_name] = model
 
+        # Start another coroutine to check the health of the model, just in case the user ends
+        # connection before the status of the model is known.
+        asyncio.create_task(self._get_healthy_model(model))
         return await self._get_healthy_model(model)
 
     async def _delete_model(self, model_name: str) -> bool:
@@ -137,9 +141,16 @@ class ModelController:
             else:
                 return False
 
-    async def _reset(self) -> None:
+    async def _reset_unsupported(self) -> None:
         """
-        Delete all model apps.
+        Reset the unsupported models.
+        """
+        async with self._lock:
+            self._model_unsupported.clear()
+
+    async def _reset_all(self) -> None:
+        """
+        Reset LLM services.
         """
         async with self._lock:
             all_models = [model for model in self._model_pool.values()]
@@ -179,6 +190,8 @@ class ModelController:
         victims: list[ModelContext] = []
         for model in self._model_pool.values():
             if model.app_name == initiator.app_name:
+                continue
+            if model.used_gpus == 0:
                 continue
             try:
                 metrics = (
@@ -236,10 +249,8 @@ class ModelController:
         if request.mode == "get":
             if request.model_type == "vllm_raw":
                 model_type = ModelType.VLLM_RAW
-            elif request.model_type == "vllm_openai_standalone":
-                model_type = ModelType.VLLM_OPENAI_STANDALONE
-            elif request.model_type == "vllm_openai_internal":
-                model_type = ModelType.VLLM_OPENAI_INTERNAL
+            elif request.model_type == "vllm_openai":
+                model_type = ModelType.VLLM_OPENAI
             else:
                 return "Invalid model type. Aborting."
             model = await self._get_or_register_model(
@@ -286,8 +297,12 @@ class ModelController:
             self._config_writer.dump_config(request.config_dump_path)
             return f"Config dumped to {request.config_dump_path}"
 
-        elif request.mode == "reset":
-            await self._reset()
+        elif request.mode == "reset_unsupported":
+            await self._reset_unsupported()
+            return "Unsupported models reset."
+
+        elif request.mode == "reset_all":
+            await self._reset_all()
             return "LLM service reset."
 
         else:
@@ -320,11 +335,53 @@ class ModelController:
 
     @main_app.post("/v1/chat/completions")
     async def create_chat_completion(self, request: ChatCompletionRequest):
-        retry = 0
-        while retry < 3:
+        async def retry_func(func, num_retries):
+            retry_count = 0
+            while retry_count < num_retries:
+                try:
+                    return await func()
+                except:
+                    retry_count += 1
+                    await asyncio.sleep(0.1)
+            return JSONResponse(content="Model Not Available", status_code=503)
+
+        async def create_batch_request(model: ModelContext) -> JSONResponse:
+            is_success, response = await model.app_handle.options(
+                stream=False
+            ).create_chat_completion_batch.remote(request)
+
+            if is_success:
+                return JSONResponse(content=response)
+            else:
+                raise RayServeException("Model Not Available")
+
+        async def create_stream_request(model: ModelContext) -> StreamingResponse:
+
+            async def put_first_back(generator, first_item) -> AsyncGenerator:
+                yield first_item
+                async for item in generator:
+                    yield item
+
+            generator = model.app_handle.options(
+                stream=True
+            ).create_chat_completion_stream.remote(request)
+
+            try:  # If the model is not available yet, it would return an empty generator
+                first_item = await anext(generator)
+            except:
+                raise RayServeException("Model Not Available")
+
+            # Since we have already consumed the first item, we need to put it back
+            valid_generator = put_first_back(generator, first_item)
+
+            return StreamingResponse(
+                content=valid_generator, media_type="text/event-stream"
+            )
+
+        async def main_func():
             model = await self._get_or_register_model(
                 model_name=request.model,
-                model_type=ModelType.VLLM_OPENAI_INTERNAL,
+                model_type=ModelType.VLLM_OPENAI,
                 gpus_per_replica=1,
             )
             if model is None:
@@ -332,24 +389,12 @@ class ModelController:
                     content=self._model_unsupported[request.model], status_code=400
                 )
 
-            try:
-                if request.stream:
-                    generator = model.app_handle.options(
-                        stream=True
-                    ).create_chat_completion_stream.remote(request)
-                    return StreamingResponse(
-                        content=generator, media_type="text/event-stream"
-                    )
+            if request.stream:
+                return await create_stream_request(model)
+            else:
+                return await create_batch_request(model)
 
-                else:
-                    response = await model.app_handle.options(
-                        stream=False
-                    ).create_chat_completion_batch.remote(request)
-                    return JSONResponse(content=response)
-            except:
-                retry += 1
-                await asyncio.sleep(0.1)
-        return JSONResponse(content="Model Not Available", status_code=503)
+        return await retry_func(main_func, 3)
 
 
 class _ControllerArgs(BaseModel):

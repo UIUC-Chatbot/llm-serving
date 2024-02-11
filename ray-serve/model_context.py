@@ -7,8 +7,7 @@ import time
 
 class ModelType(Enum):
     VLLM_RAW = 1  # Raw VLLM model, created by llm = LLM(model="model_name")
-    VLLM_OPENAI_STANDALONE = 2  # Standalone VLLM OpenAI-Compatible server
-    VLLM_OPENAI_INTERNAL = 3  # Internal VLLM OpenAI-Compatible server
+    VLLM_OPENAI = 2  # VLLM OpenAI-Compatible server
 
 
 class ModelPath:
@@ -20,11 +19,8 @@ class ModelPath:
         if model_type == ModelType.VLLM_RAW:
             return "models.vllm_raw:app_builder"
 
-        elif model_type == ModelType.VLLM_OPENAI_STANDALONE:
-            return "models.vllm_openai.openai_standalone:app_builder"
-
-        elif model_type == ModelType.VLLM_OPENAI_INTERNAL:
-            return "models.vllm_openai.openai_internal:app_builder"
+        elif model_type == ModelType.VLLM_OPENAI:
+            return "models.vllm_openai.vllm_openai:app_builder"
 
         else:
             raise ValueError("Invalid model type.")
