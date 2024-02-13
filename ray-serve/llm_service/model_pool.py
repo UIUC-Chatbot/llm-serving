@@ -37,7 +37,6 @@ class _AdminRequest(BaseModel):
     model_name: str = "meta-llama/Llama-2-7b-chat-hf"
     model_type: str = "vllm_openai"
     gpus_per_replica: int = 1
-    config_dump_path: str = "latest_config.yaml"
 
 
 main_app = FastAPI()
@@ -241,72 +240,72 @@ class ModelController:
     """
 
     @main_app.post("/admin")
-    async def admin_call(self, request: _AdminRequest):
+    async def admin_call(self, request: _AdminRequest) -> str | dict:
         # TODO: the key is currently visible on GitHub. We need to change this.
         if request.key != "IloveRocknRoll":
             return "Permission denied. Aborting."
 
-        if request.mode == "get":
-            if request.model_type == "vllm_raw":
-                model_type = ModelType.VLLM_RAW
-            elif request.model_type == "vllm_openai":
-                model_type = ModelType.VLLM_OPENAI
-            else:
-                return "Invalid model type. Aborting."
-            model = await self._get_or_register_model(
-                model_name=request.model_name,
-                model_type=model_type,
-                gpus_per_replica=request.gpus_per_replica,
-            )
-            if model is not None:
-                return f"Model {model.model_name} endpoint: {model.route_prefix}"
-            else:
-                return f"Model {request.model_name} not supported: {self._model_unsupported[request.model_name]}"
-
-        elif request.mode == "delete":
-            if await self._delete_model(request.model_name):
-                return f"Model {request.model_name} deleted."
-            else:
-                return f"Model {request.model_name} not found."
-
-        elif request.mode == "list":
-            dump_model_pool = []
-            for model in self._model_pool.values():
-                dump_model_pool.append(
-                    {
-                        "model_name": model.model_name,
-                        "model_type": model.model_type,
-                        "route_prefix": model.route_prefix,
-                        "gpus_per_replica": model.gpus_per_replica,
-                        "used_gpus": model.used_gpus,
-                    }
+        match request.mode:
+            case "get":
+                if request.model_type == "vllm_raw":
+                    model_type = ModelType.VLLM_RAW
+                elif request.model_type == "vllm_openai":
+                    model_type = ModelType.VLLM_OPENAI
+                else:
+                    return "Invalid model type. Aborting."
+                model = await self._get_or_register_model(
+                    model_name=request.model_name,
+                    model_type=model_type,
+                    gpus_per_replica=request.gpus_per_replica,
                 )
+                if model is not None:
+                    return f"Model {model.model_name} endpoint: {model.route_prefix}"
+                else:
+                    return f"Model {request.model_name} not supported: {self._model_unsupported[request.model_name]}"
 
-            dump_model_unsupported = []
-            for model_name, error_message in self._model_unsupported.items():
-                dump_model_unsupported.append(
-                    {"model_name": model_name, "error_message": error_message}
-                )
+            case "delete":
+                if await self._delete_model(request.model_name):
+                    return f"Model {request.model_name} deleted."
+                else:
+                    return f"Model {request.model_name} not found."
 
-            return {
-                "model_pool": dump_model_pool,
-                "model_unsupported": dump_model_unsupported,
-            }
+            case "list":
+                dump_model_pool = []
+                for model in self._model_pool.values():
+                    dump_model_pool.append(
+                        {
+                            "model_name": model.model_name,
+                            "model_type": model.model_type,
+                            "route_prefix": model.route_prefix,
+                            "gpus_per_replica": model.gpus_per_replica,
+                            "used_gpus": model.used_gpus,
+                        }
+                    )
 
-        elif request.mode == "dump_config":
-            self._config_writer.dump_config(request.config_dump_path)
-            return f"Config dumped to {request.config_dump_path}"
+                dump_model_unsupported = []
+                for model_name, error_message in self._model_unsupported.items():
+                    dump_model_unsupported.append(
+                        {"model_name": model_name, "error_message": error_message}
+                    )
 
-        elif request.mode == "reset_unsupported":
-            await self._reset_unsupported()
-            return "Unsupported models reset."
+                return {
+                    "model_pool": dump_model_pool,
+                    "model_unsupported": dump_model_unsupported,
+                }
 
-        elif request.mode == "reset_all":
-            await self._reset_all()
-            return "LLM service reset."
+            case "dump_config":
+                return self._config_writer.get_current_config()
 
-        else:
-            return "Invalid mode. Aborting."
+            case "reset_unsupported":
+                await self._reset_unsupported()
+                return "Unsupported models reset."
+
+            case "reset_all":
+                await self._reset_all()
+                return "LLM service reset."
+
+            case _:
+                return "Invalid mode. Aborting."
 
     """
     OpenAI-ish API endpoints

@@ -150,6 +150,5 @@ class ConfigWriter:
         self._apply_config()
         self._logger.info(f"Apps: {names_model_to_deactivate} deactivated.")
 
-    def dump_config(self, file_path: str) -> None:
-        with open(file_path, "w") as file:
-            yaml.dump(self._config, file, sort_keys=False)
+    def get_current_config(self) -> dict:
+        return self._config
