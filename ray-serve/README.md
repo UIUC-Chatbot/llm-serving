@@ -2,15 +2,15 @@
 
 ## Usage
 
-1. Navigate to the root directory of the project (**ray-serve**).
-1. Start Ray cluster in the root directory, e.g. `ray start --head --num-gpus=$(GPU_COUNT)`.  
-    `import_path` depends on the location where Ray is started.
+1. Navigate to **/ray-serve/llm_service**.
+1. Start Ray cluster, e.g. `ray start --head --num-gpus=$(GPU_COUNT)`.  
+    `import_path` depends on the location where Ray was started.
 1. Use [**config file**](https://docs.ray.io/en/latest/serve/production-guide/config.html#serve-in-production-config-file) to specify the model and the serving configuration.
 1. Start llm-serving: `serve deploy $(config file)`
 1.
     - Users can send requests using OpenAI api.
-    - Administrators can directly call the `ModelController` to manage models.
+    - Administrators can directly manage the model pool by using **admin_client**.
 
 ## Architecture
 
-Please read **model_pool.py**.
+Please read **/llm_service/model_pool.py**.

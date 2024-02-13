@@ -16,7 +16,7 @@ async def send_post_request(session: ClientSession, endpoint: str, data: dict):
         return response_text
 
 
-endpoint = f"http://{args.endpoint}"
+endpoint = args.endpoint
 
 models = [
     "baichuan-inc/Baichuan-7B",
