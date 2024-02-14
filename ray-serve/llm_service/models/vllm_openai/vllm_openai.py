@@ -32,7 +32,7 @@ import time
 from typing import AsyncGenerator
 
 
-def parse_args(model_name: str):
+def parse_args(model_name: str, gpus_per_replica: int):
     parser = argparse.ArgumentParser(
         description="vLLM OpenAI-Compatible RESTful API server."
     )
@@ -118,6 +118,8 @@ def parse_args(model_name: str):
             "--model",
             model_name,
             "--trust-remote-code",
+            "--tensor-parallel-size",
+            f"{gpus_per_replica}",
         ]
     )
 
@@ -142,8 +144,8 @@ class _FakeRequest:
 @serve.ingress(app)
 class ModelApp(ModelAppInterface):
 
-    def __init__(self, model_name: str, controller: str) -> None:
-        self.args = parse_args(model_name)
+    def __init__(self, model_name: str, controller: str, gpus_per_replica: int) -> None:
+        self.args = parse_args(model_name, gpus_per_replica)
         self.logger = init_logger(__name__)
 
         app.add_middleware(
@@ -296,6 +298,12 @@ class ModelApp(ModelAppInterface):
     async def create_chat_completion_stream(
         self, request: ChatCompletionRequest
     ) -> AsyncGenerator:
+        """
+        The original method returns a StreamingResponse wrapping an async generator. However, this
+        response is not serializable and cannot be returned directly to the controller in Ray.
+
+        Ray supports returning generators, so we have to make this function itself a generator.
+        """
 
         if not await self._check_model_availability():
             return
@@ -308,4 +316,4 @@ class ModelApp(ModelAppInterface):
 
 
 def app_builder(args: ModelAppArgs):
-    return ModelApp.bind(args.model_name, args.controller)
+    return ModelApp.bind(args.model_name, args.controller, args.gpus_per_replica)

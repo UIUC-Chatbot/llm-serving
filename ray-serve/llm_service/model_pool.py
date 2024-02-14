@@ -1,6 +1,7 @@
 import asyncio
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse, StreamingResponse, Response
+import json
 from logging import getLogger, Logger
 from pydantic import BaseModel
 import ray
@@ -45,11 +46,23 @@ main_app = FastAPI()
 @serve.deployment
 @serve.ingress(main_app)
 class ModelController:
-    def __init__(self, config_file_path: str, num_gpus: int) -> None:
+    def __init__(
+        self, config_file_path: str, num_gpus: int, model_reference_path: str | None
+    ) -> None:
         self._config_writer: ConfigWriter = ConfigWriter(config_file_path)
         self._logger: Logger = getLogger("ray.serve")
         self._model_pool: dict[str, ModelContext] = {}  # Currently registered models
         self._model_unsupported: dict[str, str] = {}  # Unsupported models
+        if model_reference_path is not None:
+            try:
+                with open(model_reference_path, "r") as f:
+                    self._model_reference: dict = json.load(f)
+                self._logger.info(f"{model_reference_path} successfully loaded.")
+            except FileNotFoundError:
+                self._logger.warning(f"{model_reference_path} not found.")
+                self._model_reference: dict = {}
+        else:
+            self._model_reference: dict = {}
         self._num_gpus: int = min(num_gpus, ray.cluster_resources().get("GPU", 0))
         self._num_served_models: int = 0
 
@@ -60,14 +73,14 @@ class ModelController:
         """
         self._lock: asyncio.Lock = asyncio.Lock()
 
-    def _has_available_gpu(self, required_gpus: int) -> bool:
+    def _count_available_gpus(self) -> int:
         """
-        Check if there is any available GPUs.
+        Return the number of available GPUs.
         """
         used_gpus: int = 0
         for model_name in self._model_pool.keys():
             used_gpus += self._model_pool[model_name].used_gpus
-        return self._num_gpus >= used_gpus + required_gpus
+        return self._num_gpus - used_gpus
 
     async def _get_healthy_model(self, model: ModelContext) -> ModelContext | None:
         """
@@ -114,7 +127,7 @@ class ModelController:
                     gpus_per_replica=gpus_per_replica,
                 )
                 self._num_served_models += 1
-                if self._has_available_gpu(gpus_per_replica):
+                if self._count_available_gpus() >= gpus_per_replica:
                     model.used_gpus = gpus_per_replica
                     self._config_writer.add_app(model=model, is_active=True)
                 else:
@@ -179,7 +192,7 @@ class ModelController:
         asyncio.create_task(self._get_healthy_model(model_in))
 
     async def _select_victim(
-        self, initiator: ModelContext, required_gpus: int
+        self, initiator: ModelContext, required_gpus: int, available_gpus: int
     ) -> list[ModelContext] | None:
         """
         The initiator model has requested to load itself into GPU. However, there is no available
@@ -206,11 +219,11 @@ class ModelController:
         for candidate in candidates:
             victims.append(candidate[0])
             num_gpus_to_release += candidate[0].used_gpus
-            if num_gpus_to_release >= required_gpus:
+            if num_gpus_to_release + available_gpus >= required_gpus:
                 break
 
         # TODO: do we need to wait here for a while? What if the victims don't fulfill the requirement?
-        if num_gpus_to_release < required_gpus:
+        if num_gpus_to_release + available_gpus < required_gpus:
             return None
         else:
             return victims
@@ -222,13 +235,16 @@ class ModelController:
         model = self._model_pool[model_name]
         if model.used_gpus > 0:
             return  # If the model is already loaded, ignore this request.
-        if self._has_available_gpu(model.gpus_per_replica):
+        available_gpus = self._count_available_gpus()
+        if available_gpus >= model.gpus_per_replica:
             return self._load_or_replace_model(model)
 
         # If there is no available GPU, evict a model from GPU and load the requested model.
         async with self._lock:
             victims: list[ModelContext] | None = await self._select_victim(
-                model, model.gpus_per_replica
+                initiator=model,
+                required_gpus=model.gpus_per_replica,
+                available_gpus=available_gpus,
             )
             if victims is None:
                 return
@@ -378,10 +394,14 @@ class ModelController:
             )
 
         async def main_func():
+            if request.model in self._model_reference:
+                gpus_per_replica = self._model_reference[request.model]
+            else:
+                gpus_per_replica = 1
             model = await self._get_or_register_model(
                 model_name=request.model,
                 model_type=ModelType.VLLM_OPENAI,
-                gpus_per_replica=1,
+                gpus_per_replica=gpus_per_replica,
             )
             if model is None:
                 return JSONResponse(
@@ -399,7 +419,10 @@ class ModelController:
 class _ControllerArgs(BaseModel):
     config_file_path: str
     num_gpus: int
+    model_reference_path: str | None = None
 
 
 def app_builder(args: _ControllerArgs) -> Application:
-    return ModelController.bind(args.config_file_path, args.num_gpus)
+    return ModelController.bind(
+        args.config_file_path, args.num_gpus, args.model_reference_path
+    )

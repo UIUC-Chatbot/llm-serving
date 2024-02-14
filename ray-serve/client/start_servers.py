@@ -4,7 +4,7 @@ from aiohttp import ClientSession
 import numpy as np
 
 parser = argparse.ArgumentParser(description="Getting Models Test")
-parser.add_argument("--endpoint", default="https://api.ncsa.ai/llm/admin")
+parser.add_argument("-e", "--endpoint", default="https://api.ncsa.ai/llm/admin")
 args = parser.parse_args()
 
 

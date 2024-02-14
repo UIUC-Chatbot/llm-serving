@@ -17,6 +17,7 @@ applications:
   args:
     config_file_path: llm_config_default.yaml
     num_gpus: 1
+    model_reference_path: model_reference.json
   runtime_env: {}
   deployments:
   - name: ModelController
