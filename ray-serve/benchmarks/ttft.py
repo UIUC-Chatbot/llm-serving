@@ -31,11 +31,22 @@ res = client.chat.completions.create(
     stream=True,
 )
 
+output = ""
+
 for idx, chunk in enumerate(res):
     if idx == 0:
-        end_time = time.time()
+        first_token_time = time.time()
         print(
-            f"Time to first token from {args.model_name}: {end_time - start_time} seconds.\n"
+            f"Time to first token from {args.model_name}: {first_token_time - start_time} seconds."
         )
     if chunk.choices[0].delta.content is not None:
-        print(chunk.choices[0].delta.content, end="")
+        text = chunk.choices[0].delta.content
+        output += text
+end_time = time.time()
+tokens = output.split()
+total_tokens = len(tokens)
+time_per_token = (end_time - first_token_time) / (total_tokens - 1)
+print(f"Time per output token from {args.model_name}: {time_per_token} seconds.")
+print(f"Total tokens: {total_tokens}")
+print("\nOutput: ")
+print(output)

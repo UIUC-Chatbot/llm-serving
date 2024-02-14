@@ -53,7 +53,7 @@ class ModelController:
         self._logger: Logger = getLogger("ray.serve")
         self._model_pool: dict[str, ModelContext] = {}  # Currently registered models
         self._model_unsupported: dict[str, str] = {}  # Unsupported models
-        if model_reference_path is not None:
+        if model_reference_path is not None:  # Number of GPUs required for large models
             try:
                 with open(model_reference_path, "r") as f:
                     self._model_reference: dict = json.load(f)
@@ -112,12 +112,18 @@ class ModelController:
         if model_name in self._model_pool:
             return await self._get_healthy_model(self._model_pool[model_name])
 
-        if model_name in self._model_unsupported or gpus_per_replica > self._num_gpus:
+        if model_name in self._model_unsupported:
+            return None
+
+        if gpus_per_replica > self._num_gpus:
+            self._model_unsupported[model_name] = "Insufficient GPU resources."
             return None
 
         # Create a new serve app for the requested model
         async with self._lock:
             # Check again because someone else might have added the model before we woke up.
+            if model_name in self._model_unsupported:
+                return None
             if model_name not in self._model_pool:
                 model = ModelContext(
                     app_name=f"{model_name.replace('/', '--')}--{self._num_served_models}",
@@ -355,9 +361,11 @@ class ModelController:
             while retry_count < num_retries:
                 try:
                     return await func()
-                except:
+                except RayServeException:
                     retry_count += 1
                     await asyncio.sleep(0.1)
+                except Exception as e:
+                    raise e
             return JSONResponse(content="Model Not Available", status_code=503)
 
         async def create_batch_request(model: ModelContext) -> JSONResponse:

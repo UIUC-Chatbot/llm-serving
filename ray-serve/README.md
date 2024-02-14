@@ -11,6 +11,10 @@
     - Users can send requests using OpenAI api.
     - Administrators can directly manage the model pool by using **admin_client**.
 
+## Model Reference File
+
+Some models are extremely large and cannot fit into a single GPU. We maintain a reference file which contains the model name and the number of GPUs required to serve the model.
+
 ## Architecture
 
 Please read **/llm_service/model_pool.py**.
