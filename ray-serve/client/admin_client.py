@@ -43,6 +43,11 @@ class AdminClient:
         with open(config_dump_path, "w") as f:
             yaml.dump(config_file, f, sort_keys=False)
 
+    def show_info(self) -> dict:
+        data = {"key": self._key, "mode": "info"}
+        response = requests.post(self._endpoint, json=data)
+        return response.json()
+
     def reset_unsupported(self) -> str:
         data = {"key": self._key, "mode": "reset_unsupported"}
         response = requests.post(self._endpoint, json=data)
@@ -62,7 +67,7 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--mode",
-        help="0: get model route; 1: delete model; 2: list models; 3: dump config; 4: reset unsupported models; 5: reset LLM service",
+        help="0: get model route; 1: delete model; 2: list models; 3: dump config; 4: show service info; 5: reset unsupported models; 6: reset LLM service",
         type=int,
         required=True,
     )
@@ -107,11 +112,16 @@ if __name__ == "__main__":
         admin_client.dump_config(args.config_dump_path)
 
     elif args.mode == 4:
+        print("Showing LLM service info")
+        res = admin_client.show_info()
+        print(res)
+
+    elif args.mode == 5:
         print("Resetting unsupported models")
         res = admin_client.reset_unsupported()
         print(res)
 
-    elif args.mode == 5:
+    elif args.mode == 6:
         print("Resetting LLM service")
         res = admin_client.reset_llm_service()
         print(res)

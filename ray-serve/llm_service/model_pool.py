@@ -76,6 +76,7 @@ class ModelController:
         else:
             self._model_reference: dict = {}
         self._num_gpus: int = min(num_gpus, ray.cluster_resources().get("GPU", 0))
+        self._logger.info(f"ModelController initialized with {self._num_gpus} GPUs.")
         self._num_served_models: int = 0
 
         """
@@ -329,6 +330,12 @@ class ModelController:
 
             case "dump_config":
                 return self._config_writer.get_current_config()
+
+            case "info":
+                return {
+                    "num_gpus": self._num_gpus,
+                    "num_served_models": self._num_served_models,
+                }
 
             case "reset_unsupported":
                 await self._reset_unsupported()
