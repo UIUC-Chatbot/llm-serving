@@ -31,6 +31,18 @@ Architecture:
     model to evict from GPU and load the requested model.
 """
 
+"""
+Mental Model:
+
+    The ModelController is a centralized server that manages the model pool. It takes requests from
+    users and execute them one at a time. User requests are essentially cooperative coroutines that
+    are running in an event loop. Therefore, only one active coroutine is running at a time and it
+    yields control to the event loop when it's "await"ing for something.
+
+    Refer to https://docs.ray.io/en/latest/serve/architecture.html#lifetime-of-a-request for more
+    details.
+"""
+
 
 class _AdminRequest(BaseModel):
     key: str

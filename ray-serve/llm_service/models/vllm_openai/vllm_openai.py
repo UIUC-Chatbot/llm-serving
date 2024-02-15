@@ -286,6 +286,10 @@ class ModelApp(ModelAppInterface):
     async def create_chat_completion_batch(
         self, request: ChatCompletionRequest
     ) -> tuple[bool, dict] | tuple[bool, None]:
+        """
+        For internal use only. This method is called by the controller to get the model response
+        in batch.
+        """
 
         if not await self._check_model_availability():
             return False, None
@@ -299,10 +303,16 @@ class ModelApp(ModelAppInterface):
         self, request: ChatCompletionRequest
     ) -> AsyncGenerator:
         """
+        For internal use only. This method is called by the controller to get the model response
+        in stream.
+
         The original method returns a StreamingResponse wrapping an async generator. However, this
         response is not serializable and cannot be returned directly to the controller in Ray.
 
-        Ray supports returning generators, so we have to make this function itself a generator.
+        Ray supports streaming response by returning generators, so we have to make this function
+        itself a generator.
+
+        Refer to https://docs.ray.io/en/latest/serve/tutorials/streaming.html for more details.
         """
 
         if not await self._check_model_availability():
