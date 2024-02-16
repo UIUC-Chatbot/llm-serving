@@ -13,7 +13,7 @@ from vllm.entrypoints.openai.protocol import ChatCompletionRequest
 
 
 from config_writer import ConfigWriter
-from model_context import ModelContext, ModelType
+from model_context import ModelContext, ModelStatus, ModelType
 
 """
 Architecture:
@@ -41,6 +41,11 @@ Mental Model:
 
     Refer to https://docs.ray.io/en/latest/serve/architecture.html#lifetime-of-a-request for more
     details.
+
+    When passing objects between Serve apps, we are actually passing copies of them. Under the hood, DeploymentResponse corresponds to a Ray ObjectRef, which is a reference to an immutable
+    object in the object store. However, the response we obtain by "await"ing the remote call is a
+    copy of the original object in the object store. Therefore, we can't modify the original object
+    by modifying the response object.
 """
 
 
@@ -55,14 +60,23 @@ class _AdminRequest(BaseModel):
 main_app = FastAPI()
 
 
-@serve.deployment
+@serve.deployment(
+    name="ModelController",
+    ray_actor_options={"num_cpus": 1, "resources": {"head_agent": 1}},
+)
 @serve.ingress(main_app)
 class ModelController:
+    """
+    This class must be deployed on the head node, since it needs to send config file to Ray
+    dashboard service, which might not be accessible from worker nodes.
+    """
+
     def __init__(
-        self, config_file_path: str, num_gpus: int, model_reference_path: str | None
+        self, config_file_path: str, max_gpus: int, model_reference_path: str | None
     ) -> None:
         self._config_writer: ConfigWriter = ConfigWriter(config_file_path)
         self._logger: Logger = getLogger("ray.serve")
+        self._max_gpus: int = max_gpus
         self._model_pool: dict[str, ModelContext] = {}  # Currently registered models
         self._model_unsupported: dict[str, str] = {}  # Unsupported models
         if model_reference_path is not None:  # Number of GPUs required for large models
@@ -75,7 +89,7 @@ class ModelController:
                 self._model_reference: dict = {}
         else:
             self._model_reference: dict = {}
-        self._num_gpus: int = min(num_gpus, ray.cluster_resources().get("GPU", 0))
+        self._num_gpus: int = min(max_gpus, ray.cluster_resources().get("GPU", 0))
         self._logger.info(f"ModelController initialized with {self._num_gpus} GPUs.")
         self._num_served_models: int = 0
 
@@ -85,6 +99,9 @@ class ModelController:
         modification process (yield control to the event loop), they must acquire the lock.
         """
         self._lock: asyncio.Lock = asyncio.Lock()
+
+    def get_model_pool(self) -> dict[str, ModelContext]:
+        return self._model_pool
 
     def _count_available_gpus(self) -> int:
         """
@@ -101,18 +118,29 @@ class ModelController:
         Return model context if the model is healthy, None otherwise.
         This function should be called before calling a model app handle.
         """
-        is_healthy = await model.check_health()
-        if is_healthy:
-            return model
-        else:
-            async with self._lock:
-                if model.model_name not in self._model_pool:
+        model_status: ModelStatus = await model.get_cached_status()
+        match model_status:
+            case ModelStatus.RUNNING:
+                return model
+            case ModelStatus.DEPLOY_FAILED:
+                async with self._lock:
+                    if model.model_name not in self._model_pool:
+                        return None
+                    # If the deployment fails, then it is very likely something went wrong in the
+                    # initialization function, so we should add this model to unsupported list.
+                    self._model_unsupported[model.model_name] = model.error_msg
+                    self._config_writer.remove_app(model)
+                    self._model_pool.pop(model.model_name)
+                    self._logger.warning(f"Model {model.model_name} deployment failed.")
                     return None
-                self._model_unsupported[model.model_name] = model.get_error_message()
-                self._config_writer.remove_app(model)
-                self._model_pool.pop(model.model_name)
-                self._logger.warning(f"Model {model.model_name} was unhealthy.")
-                return None
+            case _:
+                async with self._lock:
+                    if model.model_name not in self._model_pool:
+                        return None
+                    self._config_writer.remove_app(model)
+                    self._model_pool.pop(model.model_name)
+                    self._logger.warning(f"Model {model.model_name} was unhealthy.")
+                    return None
 
     async def _get_or_register_model(
         self, model_name: str, model_type: ModelType, gpus_per_replica: int
@@ -152,12 +180,9 @@ class ModelController:
                 else:
                     model.used_gpus = 0
                     self._config_writer.add_app(model=model, is_active=False)
-                model.health_reset()
+                model.status_reset()
                 self._model_pool[model_name] = model
 
-        # Start another coroutine to check the health of the model, just in case the user ends
-        # connection before the status of the model is known.
-        asyncio.create_task(self._get_healthy_model(model))
         return await self._get_healthy_model(model)
 
     async def _delete_model(self, model_name: str) -> bool:
@@ -203,11 +228,11 @@ class ModelController:
             self._config_writer.deactivate_apps(models_out)
             for model_out in models_out:
                 model_out.used_gpus = 0
-                model_out.health_reset()
+                model_out.status_reset()
                 asyncio.create_task(self._get_healthy_model(model_out))
         self._config_writer.activate_app(model_in)
         model_in.used_gpus = model_in.gpus_per_replica
-        model_in.health_reset()
+        model_in.status_reset()
         asyncio.create_task(self._get_healthy_model(model_in))
 
     async def _select_victim(
@@ -270,6 +295,9 @@ class ModelController:
             else:
                 return self._load_or_replace_model(model, victims)
 
+    def get_current_config(self) -> dict:
+        return self._config_writer.get_current_config()
+
     """
     Admin API endpoints
     """
@@ -296,7 +324,10 @@ class ModelController:
                 if model is not None:
                     return f"Model {model.model_name} endpoint: {model.route_prefix}"
                 else:
-                    return f"Model {request.model_name} not supported: {self._model_unsupported[request.model_name]}"
+                    if model in self._model_unsupported:
+                        return f"Model {request.model_name} not supported: {self._model_unsupported[request.model_name]}"
+                    else:
+                        return f"Model {request.model_name} initialization failed."
 
             case "delete":
                 if await self._delete_model(request.model_name):
@@ -329,7 +360,7 @@ class ModelController:
                 }
 
             case "dump_config":
-                return self._config_writer.get_current_config()
+                return self.get_current_config()
 
             case "info":
                 return {
@@ -445,11 +476,11 @@ class ModelController:
 
 class _ControllerArgs(BaseModel):
     config_file_path: str
-    num_gpus: int
+    max_gpus: int
     model_reference_path: str | None = None
 
 
 def app_builder(args: _ControllerArgs) -> Application:
     return ModelController.bind(
-        args.config_file_path, args.num_gpus, args.model_reference_path
+        args.config_file_path, args.max_gpus, args.model_reference_path
     )
