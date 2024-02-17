@@ -16,9 +16,19 @@ applications:
   import_path: model_pool:app_builder
   args:
     config_file_path: llm_config_default.yaml
-    num_gpus: 1
     model_reference_path: model_reference.json
   runtime_env: {}
   deployments:
   - name: ModelController
+    num_replicas: 1
+- name: llm-daemon
+  route_prefix: /daemon
+  import_path: model_daemon:app_builder
+  args:
+    controller: llm-serving
+    check_period: 60
+    dump_period: 90
+  runtime_env: {}
+  deployments:
+  - name: Daemon
     num_replicas: 1

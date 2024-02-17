@@ -26,7 +26,7 @@ class ConfigWriter:
         self._apps: list[dict] = self._config["applications"]
         self._logger: Logger = getLogger("ray.serve")
 
-    def _apply_config(self) -> None:
+    def apply_config(self) -> None:
         """
         The following code sends a request containing the latest config file to the Ray
         dashboard, which then updates the serve apps and deployments. The call is async; it
@@ -48,7 +48,7 @@ class ConfigWriter:
                     deduplicated_apps.append(app)
             self._config["applications"] = deduplicated_apps
             self._apps = self._config["applications"]
-            self._logger.info("Config file deduplicated.")
+            self._logger.info("Config file deduplicated (if there was duplication).")
 
     def add_app(self, model: ModelContext, is_active: bool) -> None:
         # import_path is the path to the model implementation file.
@@ -97,7 +97,7 @@ class ConfigWriter:
             }
         )
 
-        self._apply_config()
+        self.apply_config()
         self._logger.info(f"App: {model.app_name} added.")
 
     def remove_app(self, model: ModelContext) -> None:
@@ -105,7 +105,7 @@ class ConfigWriter:
             app for app in self._apps if app.get("name") != model.app_name
         ]
         self._apps = self._config["applications"]
-        self._apply_config()
+        self.apply_config()
         self._logger.info(f"App: {model.app_name} removed.")
 
     def remove_apps(self, models: list[ModelContext]) -> None:
@@ -114,7 +114,7 @@ class ConfigWriter:
             app for app in self._apps if app.get("name") not in names_model_to_evict
         ]
         self._apps = self._config["applications"]
-        self._apply_config()
+        self.apply_config()
         self._logger.info(f"Apps: {names_model_to_evict} removed.")
 
     def activate_app(self, model: ModelContext) -> None:
@@ -128,7 +128,7 @@ class ConfigWriter:
                     # for details.
                     app["deployments"][0]["ray_actor_options"].pop("num_gpus", None)
 
-        self._apply_config()
+        self.apply_config()
         self._logger.info(f"App: {model.app_name} activated.")
 
     def deactivate_app(self, model: ModelContext) -> None:
@@ -137,7 +137,7 @@ class ConfigWriter:
                 app["deployments"][0]["user_config"]["is_active"] = False
                 app["deployments"][0]["ray_actor_options"]["num_gpus"] = 0
 
-        self._apply_config()
+        self.apply_config()
         self._logger.info(f"App: {model.app_name} deactivated.")
 
     def deactivate_apps(self, models: list[ModelContext]) -> None:
@@ -147,7 +147,7 @@ class ConfigWriter:
                 app["deployments"][0]["user_config"]["is_active"] = False
                 app["deployments"][0]["ray_actor_options"]["num_gpus"] = 0
 
-        self._apply_config()
+        self.apply_config()
         self._logger.info(f"Apps: {names_model_to_deactivate} deactivated.")
 
     def get_current_config(self) -> dict:

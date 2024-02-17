@@ -62,7 +62,7 @@ main_app = FastAPI()
 
 @serve.deployment(
     name="ModelController",
-    ray_actor_options={"num_cpus": 1, "resources": {"head_agent": 1}},
+    ray_actor_options={"num_cpus": 1, "resources": {"head_agents": 1}},
 )
 @serve.ingress(main_app)
 class ModelController:
@@ -71,12 +71,9 @@ class ModelController:
     dashboard service, which might not be accessible from worker nodes.
     """
 
-    def __init__(
-        self, config_file_path: str, max_gpus: int, model_reference_path: str | None
-    ) -> None:
+    def __init__(self, config_file_path: str, model_reference_path: str | None) -> None:
         self._config_writer: ConfigWriter = ConfigWriter(config_file_path)
         self._logger: Logger = getLogger("ray.serve")
-        self._max_gpus: int = max_gpus
         self._model_pool: dict[str, ModelContext] = {}  # Currently registered models
         self._model_unsupported: dict[str, str] = {}  # Unsupported models
         if model_reference_path is not None:  # Number of GPUs required for large models
@@ -89,7 +86,7 @@ class ModelController:
                 self._model_reference: dict = {}
         else:
             self._model_reference: dict = {}
-        self._num_gpus: int = min(max_gpus, ray.cluster_resources().get("GPU", 0))
+        self._num_gpus: int = ray.cluster_resources().get("GPU", 0)
         self._logger.info(f"ModelController initialized with {self._num_gpus} GPUs.")
         self._num_served_models: int = 0
 
@@ -100,8 +97,21 @@ class ModelController:
         """
         self._lock: asyncio.Lock = asyncio.Lock()
 
-    def get_model_pool(self) -> dict[str, ModelContext]:
-        return self._model_pool
+        # Apply the initial config, just in case if the ModelController is restarted for some
+        # reason, it's better to restart the whole LLM service.
+        self._config_writer.apply_config()
+        self._logger.info("LLM Service initialized.")
+
+    def get_service_info(self) -> dict:
+        return {
+            "num_gpus": self._num_gpus,
+            "num_served_models": self._num_served_models,
+            "model_pool": self._model_pool,
+        }
+
+    async def set_num_gpus(self, num_gpus: int) -> None:
+        async with self._lock:
+            self._num_gpus = min(num_gpus, ray.cluster_resources().get("GPU", 0))
 
     def _count_available_gpus(self) -> int:
         """
@@ -462,9 +472,12 @@ class ModelController:
                 gpus_per_replica=gpus_per_replica,
             )
             if model is None:
-                return JSONResponse(
-                    content=self._model_unsupported[request.model], status_code=400
-                )
+                if request.model in self._model_unsupported:
+                    return JSONResponse(
+                        content=self._model_unsupported[request.model], status_code=400
+                    )
+                else:
+                    return JSONResponse(content="Model Not Available", status_code=400)
 
             if request.stream:
                 return await create_stream_request(model)
@@ -476,11 +489,8 @@ class ModelController:
 
 class _ControllerArgs(BaseModel):
     config_file_path: str
-    max_gpus: int
     model_reference_path: str | None = None
 
 
 def app_builder(args: _ControllerArgs) -> Application:
-    return ModelController.bind(
-        args.config_file_path, args.max_gpus, args.model_reference_path
-    )
+    return ModelController.bind(args.config_file_path, args.model_reference_path)

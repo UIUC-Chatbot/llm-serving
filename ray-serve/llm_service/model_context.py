@@ -64,6 +64,7 @@ class ModelContext:
         """
         while True:
             try:
+                await asyncio.sleep(1)
                 app_status = serve.status().applications[self.app_name].status
                 match app_status:
                     case "RUNNING":
@@ -82,7 +83,6 @@ class ModelContext:
                     case "UNHEALTHY":
                         self._deployment_status = ModelStatus.UNHEALTHY
                         return self._deployment_status
-                await asyncio.sleep(1)
             except:
                 self._deployment_status = ModelStatus.NONEXISTENT
                 return self._deployment_status
