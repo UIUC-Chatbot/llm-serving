@@ -20,15 +20,20 @@ Architecture:
 
     The ModelController is a Ray serve app that manages the model pool. It dynamically loads models
     on demand and performs model switching when necessary. It also handles model deletion requests.
-    It updates serve app by modifying the config file and sending it to the Ray dashboard service.
+    It updates serve apps by modifying a config file and sending it to the Ray dashboard service.
 
     Each individual model is wrapped in a ModelApp class and deployed as its own Ray Serve app.
     They have their own endpoints. ModelApp is an abstract class, and the actual model
     implementation is specified by the model_type.
 
-    When a ModelApp is inactive, users might request to load that model. The ModelApp sends a
-    request to the ModelController to load the model. The ModelController might select a victim
-    model to evict from GPU and load the requested model.
+    When a ModelApp is inactive but wants to load itself into GPUs, it sends a request to the
+    ModelController to load the model. The ModelController might select victim models to evict from
+    GPUs and load the requested model.
+
+    A model daemon is deployed on the head node. It periodically checks the health of the model pool
+    and the availability of GPUs. If a ModelApp becomes unhealthy, probably due to worker node it is
+    running on being down, Ray will try to redeploy the ModelApp on other worker nodes. If, however,
+    there is no available resources, then we need to remove those unhealthy ModelApps.
 """
 
 """
@@ -64,6 +69,7 @@ main_app = FastAPI()
 @serve.deployment(
     name="ModelController",
     ray_actor_options={"num_cpus": 1, "resources": {"head_agents": 1}},
+    logging_config={"enable_access_log": False},
 )
 @serve.ingress(main_app)
 class ModelController:
@@ -98,8 +104,11 @@ class ModelController:
         """
         self._lock: asyncio.Lock = asyncio.Lock()
 
-        # Apply the initial config, just in case if the ModelController is restarted for some
-        # reason, it's better to restart the whole LLM service.
+        """
+        Apply the initial config, just in case the ModelController is restarted for some reason,
+        it's better to restart the whole LLM service.
+        (assuming the provided config file only has the default configs and no model apps configs)
+        """
         self._config_writer.apply_config()
         self._logger.info("LLM Service initialized.")
 
@@ -113,6 +122,7 @@ class ModelController:
     async def set_num_gpus(self, num_gpus: int) -> None:
         async with self._lock:
             self._num_gpus = min(num_gpus, ray.cluster_resources().get("GPU", 0))
+        self._logger.info(f"Number of GPUs set to {self._num_gpus}.")
 
     def _count_available_gpus(self) -> int:
         """
@@ -135,8 +145,18 @@ class ModelController:
                 return model
             case ModelStatus.DEPLOY_FAILED:
                 async with self._lock:
+                    # Check whether the app exists because someone else might have removed it.
                     if model.model_name not in self._model_pool:
                         return None
+                    if model.app_name != self._model_pool[model.model_name].app_name:
+                        """
+                        In rare cases, the app corresponding to the current model context has been
+                        removed, but a new app with the same model name has been created, therefore
+                        the model name can be found in the model pool, but the app name is
+                        different.
+                        """
+                        return None
+
                     # If the deployment fails, then it is very likely something went wrong in the
                     # initialization function, so we should add this model to unsupported list.
                     self._model_unsupported[model.model_name] = model.error_msg
@@ -146,8 +166,18 @@ class ModelController:
                     return None
             case _:
                 async with self._lock:
+                    # Check whether the app exists because someone else might have removed it.
                     if model.model_name not in self._model_pool:
                         return None
+                    if model.app_name != self._model_pool[model.model_name].app_name:
+                        """
+                        In rare cases, the app corresponding to the current model context has been
+                        removed, but a new app with the same model name has been created, therefore
+                        the model name can be found in the model pool, but the app name is
+                        different.
+                        """
+                        return None
+
                     self._config_writer.remove_app(model)
                     self._model_pool.pop(model.model_name)
                     self._logger.warning(f"Model {model.model_name} was unhealthy.")
@@ -252,6 +282,9 @@ class ModelController:
         """
         The initiator model has requested to load itself into GPU. However, there is no available
         GPU. This function selects a victim model to evict from GPU.
+
+        This function calls each model's collect_eviction_defense_metrics method to get the lastest
+        service information.
         """
         candidates = []
         victims: list[ModelContext] = []
@@ -261,10 +294,20 @@ class ModelController:
             if model.used_gpus == 0:
                 continue
             try:
-                metrics = (
-                    await model.app_handle.collect_eviction_defense_metrics.remote()
+                """
+                The caller of this function owns the lock, so we don't want this function to block
+                for too long. We set a timeout and ignore the model if it doesn't respond in time.
+                """
+                metrics = await asyncio.wait_for(
+                    model.app_handle.collect_eviction_defense_metrics.remote(),
+                    timeout=15,
                 )
-            except (AttributeError, RayServeException):
+            except (
+                AttributeError,
+                RayServeException,
+                TimeoutError,
+                asyncio.TimeoutError,
+            ):
                 continue
             candidates.append((model, metrics["last_served_time"]))
 
@@ -286,7 +329,11 @@ class ModelController:
     async def handle_unavailable_model(self, model_name: str) -> None:
         """
         This function is called by an inactive ModelApp who wants to load itself into GPU.
+
+        It tries its best to unload some models to make room for the requested model, but there is
+        no guarantee that the requested model will be loaded into GPU.
         """
+        self._logger.info(f"Trying to load model {model_name} into GPUs.")
         model = self._model_pool[model_name]
         if model.used_gpus > 0:
             return  # If the model is already loaded, ignore this request.
@@ -295,6 +342,9 @@ class ModelController:
             return self._load_or_replace_model(model)
 
         # If there is no available GPU, evict a model from GPU and load the requested model.
+        self._logger.info(
+            f"No available GPUs for model {model_name}, trying to evict other models."
+        )
         async with self._lock:
             victims: list[ModelContext] | None = await self._select_victim(
                 initiator=model,
@@ -302,9 +352,10 @@ class ModelController:
                 available_gpus=available_gpus,
             )
             if victims is None:
-                return
+                self._logger.info(f"Resource unavailable for model {model_name}.")
             else:
-                return self._load_or_replace_model(model, victims)
+                self._load_or_replace_model(model, victims)
+                self._logger.info(f"Model {model_name} loaded into GPUs.")
 
     def get_current_config(self) -> dict:
         return self._config_writer.get_current_config()
@@ -375,7 +426,8 @@ class ModelController:
 
             case "info":
                 return {
-                    "num_gpus": self._num_gpus,
+                    "num_total_gpus": self._num_gpus,
+                    "num_available_gpus:": self._count_available_gpus(),
                     "num_served_models": self._num_served_models,
                 }
 

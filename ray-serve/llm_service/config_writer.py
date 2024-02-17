@@ -98,7 +98,9 @@ class ConfigWriter:
         )
 
         self.apply_config()
-        self._logger.info(f"App: {model.app_name} added.")
+        self._logger.info(
+            f"App: {model.app_name} added, status: {'active' if is_active else 'inactive'}."
+        )
 
     def remove_app(self, model: ModelContext) -> None:
         self._config["applications"] = [
