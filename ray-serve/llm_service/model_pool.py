@@ -35,14 +35,15 @@ Architecture:
 Mental Model:
 
     The ModelController is a centralized server that manages the model pool. It takes requests from
-    users and execute them one at a time. User requests are essentially cooperative coroutines that
+    users and executes them one at a time. User requests are essentially cooperative coroutines that
     are running in an event loop. Therefore, only one active coroutine is running at a time and it
     yields control to the event loop when it's "await"ing for something.
 
     Refer to https://docs.ray.io/en/latest/serve/architecture.html#lifetime-of-a-request for more
     details.
 
-    When passing objects between Serve apps, we are actually passing copies of them. Under the hood, DeploymentResponse corresponds to a Ray ObjectRef, which is a reference to an immutable
+    When passing objects between Serve apps, we are actually passing copies of them. Under the hood,
+    DeploymentResponse corresponds to a Ray ObjectRef, which is a reference to an immutable
     object in the object store. However, the response we obtain by "await"ing the remote call is a
     copy of the original object in the object store. Therefore, we can't modify the original object
     by modifying the response object.
