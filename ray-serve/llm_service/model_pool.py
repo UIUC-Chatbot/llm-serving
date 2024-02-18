@@ -105,24 +105,22 @@ class ModelController:
         self._lock: asyncio.Lock = asyncio.Lock()
 
         """
-        Apply the initial config, just in case the ModelController is restarted for some reason,
-        it's better to restart the whole LLM service.
+        Apply the initial config, just in case the ModelController is restarted during service for
+        some reason, it's better to restart the whole LLM service, since the model_pool is reset to
+        empty and all past information is lost.
         (assuming the provided config file only has the default configs and no model apps configs)
         """
         self._config_writer.apply_config()
         self._logger.info("LLM Service initialized.")
 
-    def get_service_info(self) -> dict:
-        return {
-            "num_gpus": self._num_gpus,
-            "num_served_models": self._num_served_models,
-            "model_pool": self._model_pool,
-        }
+    def get_num_gpus(self) -> int:
+        return self._num_gpus
 
-    async def set_num_gpus(self, num_gpus: int) -> None:
+    async def set_num_gpus(self, num_gpus: int) -> int:
         async with self._lock:
             self._num_gpus = min(num_gpus, ray.cluster_resources().get("GPU", 0))
         self._logger.info(f"Number of GPUs set to {self._num_gpus}.")
+        return self._num_gpus
 
     def _count_available_gpus(self) -> int:
         """
@@ -183,7 +181,7 @@ class ModelController:
                     self._logger.warning(f"Model {model.model_name} was unhealthy.")
                     return None
 
-    async def _get_or_register_model(
+    async def get_or_register_model(
         self, model_name: str, model_type: ModelType, gpus_per_replica: int
     ) -> ModelContext | None:
         """
@@ -198,7 +196,9 @@ class ModelController:
             return None
 
         if gpus_per_replica > self._num_gpus:
-            self._model_unsupported[model_name] = "Insufficient GPU resources."
+            self._model_unsupported[model_name] = (
+                f"Insufficient GPU resources for model {model_name}."
+            )
             return None
 
         # Create a new serve app for the requested model
@@ -226,26 +226,37 @@ class ModelController:
 
         return await self._get_healthy_model(model)
 
-    async def _delete_model(self, model_name: str) -> bool:
+    async def delete_model_by_model_name(self, model_name: str) -> bool:
         """
-        Delete the model app with the given name.
+        Delete the model app with the given model name.
         """
         async with self._lock:
             if model_name in self._model_pool:
                 self._config_writer.remove_app(self._model_pool[model_name])
                 self._model_pool.pop(model_name)
                 return True
-            else:
-                return False
+            return False
 
-    async def _reset_unsupported(self) -> None:
+    async def delete_model_by_app_name(self, app_name: str) -> bool:
+        """
+        Delete the model app with the given app name.
+        """
+        async with self._lock:
+            for model in self._model_pool.values():
+                if model.app_name == app_name:
+                    self._config_writer.remove_app(model)
+                    self._model_pool.pop(model.model_name)
+                    return True
+            return False
+
+    async def reset_unsupported(self) -> None:
         """
         Reset the unsupported models.
         """
         async with self._lock:
             self._model_unsupported.clear()
 
-    async def _reset_all(self) -> None:
+    async def reset_all(self) -> None:
         """
         Reset LLM services.
         """
@@ -283,7 +294,7 @@ class ModelController:
         The initiator model has requested to load itself into GPU. However, there is no available
         GPU. This function selects a victim model to evict from GPU.
 
-        This function calls each model's collect_eviction_defense_metrics method to get the lastest
+        This function calls each model's collect_eviction_defense_metrics method to get the latest
         service information.
         """
         candidates = []
@@ -310,6 +321,9 @@ class ModelController:
             ):
                 continue
             candidates.append((model, metrics["last_served_time"]))
+        self._logger.info(
+            f"Candidates for eviction: {[candidate[0].model_name for candidate in candidates]}"
+        )
 
         # Remove the least recently used model
         candidates.sort(key=lambda x: x[1])
@@ -355,7 +369,6 @@ class ModelController:
                 self._logger.info(f"Resource unavailable for model {model_name}.")
             else:
                 self._load_or_replace_model(model, victims)
-                self._logger.info(f"Model {model_name} loaded into GPUs.")
 
     def get_current_config(self) -> dict:
         return self._config_writer.get_current_config()
@@ -378,7 +391,7 @@ class ModelController:
                     model_type = ModelType.VLLM_OPENAI
                 else:
                     return "Invalid model type. Aborting."
-                model = await self._get_or_register_model(
+                model = await self.get_or_register_model(
                     model_name=request.model_name,
                     model_type=model_type,
                     gpus_per_replica=request.gpus_per_replica,
@@ -386,13 +399,13 @@ class ModelController:
                 if model is not None:
                     return f"Model {model.model_name} endpoint: {model.route_prefix}"
                 else:
-                    if model in self._model_unsupported:
+                    if request.model_name in self._model_unsupported:
                         return f"Model {request.model_name} not supported: {self._model_unsupported[request.model_name]}"
                     else:
                         return f"Model {request.model_name} initialization failed."
 
             case "delete":
-                if await self._delete_model(request.model_name):
+                if await self.delete_model_by_model_name(request.model_name):
                     return f"Model {request.model_name} deleted."
                 else:
                     return f"Model {request.model_name} not found."
@@ -432,11 +445,11 @@ class ModelController:
                 }
 
             case "reset_unsupported":
-                await self._reset_unsupported()
+                await self.reset_unsupported()
                 return "Unsupported models reset."
 
             case "reset_all":
-                await self._reset_all()
+                await self.reset_all()
                 return "LLM service reset."
 
             case _:
@@ -479,7 +492,9 @@ class ModelController:
                     await asyncio.sleep(0.1)
                 except Exception as e:
                     raise e
-            return JSONResponse(content="Model Not Available", status_code=503)
+            return JSONResponse(
+                content="Service Temporarily Unavailable", status_code=503
+            )
 
         async def create_batch_request(model: ModelContext) -> JSONResponse:
             is_success, response = await model.app_handle.options(
@@ -519,7 +534,7 @@ class ModelController:
                 gpus_per_replica = self._model_reference[request.model]
             else:
                 gpus_per_replica = 1
-            model = await self._get_or_register_model(
+            model = await self.get_or_register_model(
                 model_name=request.model,
                 model_type=ModelType.VLLM_OPENAI,
                 gpus_per_replica=gpus_per_replica,

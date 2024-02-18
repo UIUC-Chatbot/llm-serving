@@ -9,7 +9,6 @@ from ray.serve.handle import DeploymentHandle
 import time
 import yaml
 
-from model_context import ModelContext, ModelStatus
 
 daemon_app = FastAPI()
 
@@ -25,73 +24,83 @@ class Daemon:
     ModelController.
     """
 
-    def __init__(self, controller: str, check_period: int, dump_period: int) -> None:
-        time.sleep(60)  # ModelController might take a while to start, wait for it
-        self._check_period: int = check_period
-        self._dump_period: int = dump_period
+    def __init__(
+        self,
+        controller: str,
+        health_check_period: int,
+        gpu_check_period: int,
+        dump_period: int,
+    ) -> None:
+        time.sleep(90)  # ModelController might take a while to start, wait for it
         self._controller: DeploymentHandle = serve.get_app_handle(controller)
         self._logger: Logger = getLogger("ray.serve")
-        self._num_health_checks: int = 0
-        self._num_config_dumps: int = 0
+        self._watch_list: dict[str, int] = {}
 
         self._logger.info(f"Daemon initialized with controller {controller}")
-        asyncio.create_task(self._check_service_health(self._check_period))
+        asyncio.create_task(self._check_service_status(health_check_period))
+        asyncio.create_task(self._count_gpus(gpu_check_period))
         asyncio.create_task(
-            self._dump_current_config("current_config.yaml", self._dump_period)
+            self._dump_current_config("current_config.yaml", dump_period)
         )
 
-    async def _check_service_health(self, check_period: int):
+    async def _count_gpus(self, check_period: int) -> None:
         while True:
-            if self._num_health_checks % 20 == 0:
-                self._logger.info("Daemon is checking model health.")
-
-            service_info: dict = await self._controller.get_service_info.remote()
-            cur_gpus: int = service_info["num_gpus"]
-            model_pool: dict[str, ModelContext] = service_info["model_pool"]
-
+            num_total_gpus: int = await self._controller.get_num_gpus.remote()
             gpus_available_in_ray: int = ray.cluster_resources().get("GPU", 0)
-            if gpus_available_in_ray != cur_gpus:
-                if gpus_available_in_ray < cur_gpus:
-                    self._logger.warning(
-                        f"GPUs requested by the service ({cur_gpus}) exceed available GPUs in Ray ({gpus_available_in_ray})."
-                    )
-                else:
-                    self._logger.info(
-                        f"Found {gpus_available_in_ray} GPUs in Ray, updating service to use them."
-                    )
-                await self._controller.set_num_gpus.remote(gpus_available_in_ray)
-
-            unhealthy_models: list[ModelContext] = []
-            for model in model_pool.values():
-                model_status: ModelStatus = await model.check_model_status()
-                if (
-                    model_status == ModelStatus.UNHEALTHY
-                    or model_status == ModelStatus.DEPLOY_FAILED
-                ):
-                    unhealthy_models.append(model)
-            if unhealthy_models:
-                self._logger.warning(
-                    f"Unhealthy models: {[model.model_name for model in unhealthy_models]}"
+            if num_total_gpus != gpus_available_in_ray:
+                self._logger.info(
+                    f"LLM service has claimed {num_total_gpus} GPUs. There are {gpus_available_in_ray} GPUs available in Ray, updating service."
                 )
-            self._num_health_checks += 1
+                await self._controller.set_num_gpus.remote(gpus_available_in_ray)
+            await asyncio.sleep(check_period)
+
+    async def _check_service_status(self, check_period: int):
+        while True:
+            app_status: dict = serve.status().applications
+            for app_name, app in app_status.items():
+                is_good: bool = True
+                if app.status == "UNHEALTHY":
+                    is_good = False
+                    self._logger.info(f"App {app_name} is unhealthy.")
+                elif app.status == "DEPLOY_FAILED":
+                    is_good = False
+                    self._logger.info(f"App {app_name} has failed to deploy.")
+
+                if is_good:
+                    self._watch_list.pop(app_name, None)
+                else:
+                    self._watch_list[app_name] = self._watch_list.get(app_name, 0) + 1
+                    if self._watch_list[app_name] >= 3:
+                        self._logger.warning(
+                            f"App {app_name} is still unhealthy after 3 checks, remove it."
+                        )
+                        await self._controller.delete_model_by_app_name.remote(app_name)
+                        self._watch_list.pop(app_name)
+                        self._logger.warning(
+                            f"Unhealthy App {app_name} has been removed."
+                        )
+
             await asyncio.sleep(check_period)
 
     async def _dump_current_config(self, dump_path: str, dump_period: int) -> None:
         while True:
-            if self._num_health_checks % 20 == 0:
-                self._logger.info("Daemon is dumping current config.")
             current_config: dict = await self._controller.get_current_config.remote()
             with open(dump_path, "w") as f:
                 yaml.dump(current_config, f, sort_keys=False)
-            self._num_config_dumps += 1
             await asyncio.sleep(dump_period)
 
 
 class _DaemonArgs(BaseModel):
     controller: str
-    check_period: int  # time period between health checks, in seconds
+    health_check_period: int  # time period between health checks, in seconds
+    gpu_check_period: int  # time period between GPU checks, in seconds
     dump_period: int  # time period between config file dumps, in seconds
 
 
 def app_builder(args: _DaemonArgs) -> Application:
-    return Daemon.bind(args.controller, args.check_period, args.dump_period)
+    return Daemon.bind(
+        args.controller,
+        args.health_check_period,
+        args.gpu_check_period,
+        args.dump_period,
+    )
