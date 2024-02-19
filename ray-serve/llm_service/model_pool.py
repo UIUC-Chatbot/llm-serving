@@ -158,9 +158,9 @@ class ModelController:
                     # If the deployment fails, then it is very likely something went wrong in the
                     # initialization function, so we should add this model to unsupported list.
                     self._model_unsupported[model.model_name] = model.error_msg
+                    self._logger.warning(f"App {model.app_name} deployment failed.")
                     self._config_writer.remove_app(model)
                     self._model_pool.pop(model.model_name)
-                    self._logger.warning(f"Model {model.model_name} deployment failed.")
                     return None
             case _:
                 async with self._lock:
@@ -176,9 +176,9 @@ class ModelController:
                         """
                         return None
 
+                    self._logger.warning(f"App {model.app_name} is {model_status}.")
                     self._config_writer.remove_app(model)
                     self._model_pool.pop(model.model_name)
-                    self._logger.warning(f"Model {model.model_name} was unhealthy.")
                     return None
 
     async def get_or_register_model(
@@ -214,6 +214,7 @@ class ModelController:
                     model_type=model_type,
                     gpus_per_replica=gpus_per_replica,
                 )
+                model.status_reset()
                 self._num_served_models += 1
                 if self._count_available_gpus() >= gpus_per_replica:
                     model.used_gpus = gpus_per_replica
@@ -221,7 +222,6 @@ class ModelController:
                 else:
                     model.used_gpus = 0
                     self._config_writer.add_app(model=model, is_active=False)
-                model.status_reset()
                 self._model_pool[model_name] = model
 
         return await self._get_healthy_model(model)

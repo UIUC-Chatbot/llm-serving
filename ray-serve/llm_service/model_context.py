@@ -83,7 +83,7 @@ class ModelContext:
                     case "UNHEALTHY":
                         self._deployment_status = ModelStatus.UNHEALTHY
                         return self._deployment_status
-            except:
+            except KeyError:
                 self._deployment_status = ModelStatus.NONEXISTENT
                 return self._deployment_status
 
