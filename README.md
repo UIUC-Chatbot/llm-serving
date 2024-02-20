@@ -1,5 +1,5 @@
-# api.kastan.ai - LLMs for all
-:star:️ https://api.kastan.ai/ :star:
+# api.NCSA.ai - LLMs for all
+:star:️ https://api.NCSA.ai/ :star:
 
 _Free & unbelievably easy LLaMA-2 inference for everyone at NCSA!_
 
@@ -12,7 +12,7 @@ Beautiful implementation detail: it’s a perfect clone of the OpenAI API, makin
 
 ## Usage
 
-:scroll: I wrote [beautiful usage docs & examples here](https://kastanday.notion.site/LLM-Serving-on-prem-OpenAI-Clone-bb06028266d842b0872465f552684177) :eyes: It literally couldn’t be simpler to use :innocent:
+:scroll: I wrote [beautiful usage docs & examples here](https://docs.ncsa.ai) :eyes: It literally couldn’t be simpler to use :innocent:
 
 :snake: In Python, it’s literally this easy:
 
