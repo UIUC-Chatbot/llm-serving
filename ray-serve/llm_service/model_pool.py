@@ -297,13 +297,10 @@ class ModelController:
         This function calls each model's collect_eviction_defense_metrics method to get the latest
         service information.
         """
-        candidates = []
-        victims: list[ModelContext] = []
-        for model in self._model_pool.values():
-            if model.app_name == initiator.app_name:
-                continue
-            if model.used_gpus == 0:
-                continue
+
+        async def get_candidate(
+            model: ModelContext,
+        ) -> tuple[ModelContext, float] | None:
             try:
                 """
                 The caller of this function owns the lock, so we don't want this function to block
@@ -311,24 +308,35 @@ class ModelController:
                 """
                 metrics = await asyncio.wait_for(
                     model.app_handle.collect_eviction_defense_metrics.remote(),
-                    timeout=15,
+                    timeout=10,
                 )
+                return model, metrics["last_served_time"]
             except (
                 AttributeError,
                 RayServeException,
                 TimeoutError,
                 asyncio.TimeoutError,
             ):
+                return None
+
+        candidates = []
+        for model in self._model_pool.values():
+            if model.app_name == initiator.app_name:
                 continue
-            candidates.append((model, metrics["last_served_time"]))
-        self._logger.info(
-            f"Candidates for eviction: {[candidate[0].model_name for candidate in candidates]}"
-        )
+            if model.used_gpus == 0:
+                continue
+            candidates.append(get_candidate(model))
+
+        candidate_reports = await asyncio.gather(*candidates)
+        available_candidates = [
+            candidate for candidate in candidate_reports if candidate is not None
+        ]
 
         # Remove the least recently used model
-        candidates.sort(key=lambda x: x[1])
+        available_candidates.sort(key=lambda x: x[1])
         num_gpus_to_release = 0
-        for candidate in candidates:
+        victims: list[ModelContext] = []
+        for candidate in available_candidates:
             victims.append(candidate[0])
             num_gpus_to_release += candidate[0].used_gpus
             if num_gpus_to_release + available_gpus >= required_gpus:
@@ -355,9 +363,9 @@ class ModelController:
         if available_gpus >= model.gpus_per_replica:
             return self._load_or_replace_model(model)
 
-        # If there is no available GPU, evict a model from GPU and load the requested model.
+        # If there is no available GPU, evict models from GPUs and load the requested model.
         self._logger.info(
-            f"No available GPUs for model {model_name}, trying to evict other models."
+            f"Model {model_name} requires {model.gpus_per_replica - available_gpus} more GPUs, trying to evict other models."
         )
         async with self._lock:
             victims: list[ModelContext] | None = await self._select_victim(
