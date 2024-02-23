@@ -55,12 +55,12 @@ class ConfigWriter:
         import_path: str = ModelPath.get_import_path(model.model_type)
 
         """
-        VLLM supports distributed inference via Ray. However, this seems to conflict with
-        Ray serve if we explicitly specify num_gpus of that deployment. For now, we just set
-        tensor_parallel_size to the required number and trust VLLM and Ray will do their
-        jobs.
-        For models that don't use distributed inference, we must specify num_gpus == 1. Otherwise,
-        Ray serve will not allocate GPU resources to the deployment.
+        VLLM supports distributed inference via Ray, i.e., using multiple GPUs for a single model.
+        VLLM utilizes Ray placement group for this feature.
+        For models that don't use distributed inference, we must specify num_gpus == 1.
+        For models that use distributed inference, we must not specify num_gpus, and use placement
+        group to specify the number of GPUs. We use strick_pack strategy to force all bundles to be
+        on the same node. GPU communications across multiple nodes seems not well supported.
         """
         if model.gpus_per_replica == 1:
             deployments = [
@@ -71,15 +71,31 @@ class ConfigWriter:
                     "user_config": {"is_active": is_active},
                 },
             ]
-        else:
-            deployments = [
-                {
-                    "name": model.wrapper_name,
-                    "num_replicas": 1,
-                    "ray_actor_options": {"num_cpus": 1},
-                    "user_config": {"is_active": is_active},
-                },
-            ]
+        else:  # Distributed inference
+            if is_active:
+                deployments = [
+                    {
+                        "name": model.wrapper_name,
+                        "num_replicas": 1,
+                        "ray_actor_options": {"num_cpus": 1},
+                        "placement_group_bundles": [
+                            {"CPU": 1, "GPU": 1} for _ in range(model.gpus_per_replica)
+                        ],
+                        "placement_group_strategy": "STRICT_PACK",
+                        "user_config": {"is_active": is_active},
+                    },
+                ]
+            else:
+                deployments = [
+                    {
+                        "name": model.wrapper_name,
+                        "num_replicas": 1,
+                        "ray_actor_options": {"num_cpus": 1},
+                        "placement_group_bundles": [{"CPU": 1}],
+                        "placement_group_strategy": "STRICT_PACK",
+                        "user_config": {"is_active": is_active},
+                    },
+                ]
 
         # Add the new app to the config file
         self._apps.append(
@@ -126,28 +142,22 @@ class ConfigWriter:
                 if model.gpus_per_replica == 1:
                     app["deployments"][0]["ray_actor_options"]["num_gpus"] = 1
                 else:
-                    # Distributed inference shouldn't use num_gpus, see comments in _add_app()
-                    # for details.
-                    app["deployments"][0]["ray_actor_options"].pop("num_gpus", None)
+                    app["deployments"][0]["placement_group_bundles"] = [
+                        {"CPU": 1, "GPU": 1} for _ in range(model.gpus_per_replica)
+                    ]
 
         self.apply_config()
         self._logger.info(f"App: {model.app_name} activated.")
-
-    def deactivate_app(self, model: ModelContext) -> None:
-        for app in self._apps:
-            if app.get("name") == model.app_name:
-                app["deployments"][0]["user_config"]["is_active"] = False
-                app["deployments"][0]["ray_actor_options"]["num_gpus"] = 0
-
-        self.apply_config()
-        self._logger.info(f"App: {model.app_name} deactivated.")
 
     def deactivate_apps(self, models: list[ModelContext]) -> None:
         names_model_to_deactivate = [model.app_name for model in models]
         for app in self._apps:
             if app.get("name") in names_model_to_deactivate:
                 app["deployments"][0]["user_config"]["is_active"] = False
-                app["deployments"][0]["ray_actor_options"]["num_gpus"] = 0
+                if app["args"]["gpus_per_replica"] == 1:
+                    app["deployments"][0]["ray_actor_options"]["num_gpus"] = 0
+                else:
+                    app["deployments"][0]["placement_group_bundles"] = [{"CPU": 1}]
 
         self.apply_config()
         self._logger.info(f"Apps: {names_model_to_deactivate} deactivated.")
