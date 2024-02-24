@@ -51,7 +51,7 @@ class ModelContext:
         self.wrapper_name: str = "ModelApp"  # The name of the model deployment
         self.created_time: int = int(time.time())
         self.gpus_per_replica: int = gpus_per_replica
-        self.used_gpus: int = 0
+        self.num_active_replicas: int = 0
         self._deployment_status: ModelStatus | None = None
 
     def status_reset(self) -> None:

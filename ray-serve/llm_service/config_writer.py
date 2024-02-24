@@ -67,7 +67,10 @@ class ConfigWriter:
                 {
                     "name": model.wrapper_name,
                     "num_replicas": 1,
-                    "ray_actor_options": {"num_cpus": 1, "num_gpus": model.used_gpus},
+                    "ray_actor_options": {
+                        "num_cpus": 1,
+                        "num_gpus": model.num_active_replicas,
+                    },
                     "user_config": {"is_active": is_active},
                 },
             ]
@@ -81,7 +84,7 @@ class ConfigWriter:
                         "placement_group_bundles": [
                             {"CPU": 1, "GPU": 1} for _ in range(model.gpus_per_replica)
                         ],
-                        "placement_group_strategy": "STRICT_PACK",
+                        "placement_group_strategy": "PACK",
                         "user_config": {"is_active": is_active},
                     },
                 ]
@@ -92,7 +95,7 @@ class ConfigWriter:
                         "num_replicas": 1,
                         "ray_actor_options": {"num_cpus": 1},
                         "placement_group_bundles": [{"CPU": 1}],
-                        "placement_group_strategy": "STRICT_PACK",
+                        "placement_group_strategy": "PACK",
                         "user_config": {"is_active": is_active},
                     },
                 ]
@@ -137,14 +140,16 @@ class ConfigWriter:
 
     def activate_app(self, model: ModelContext) -> None:
         for app in self._apps:
-            if app.get("name") == model.app_name:
-                app["deployments"][0]["user_config"]["is_active"] = True
-                if model.gpus_per_replica == 1:
-                    app["deployments"][0]["ray_actor_options"]["num_gpus"] = 1
-                else:
-                    app["deployments"][0]["placement_group_bundles"] = [
-                        {"CPU": 1, "GPU": 1} for _ in range(model.gpus_per_replica)
-                    ]
+            if app.get("name") != model.app_name:
+                continue
+            app["deployments"][0]["user_config"]["is_active"] = True
+            if model.gpus_per_replica == 1:
+                app["deployments"][0]["ray_actor_options"]["num_gpus"] = 1
+            else:
+                app["deployments"][0]["placement_group_bundles"] = [
+                    {"CPU": 1, "GPU": 1} for _ in range(model.gpus_per_replica)
+                ]
+            break
 
         self.apply_config()
         self._logger.info(f"App: {model.app_name} activated.")
@@ -152,12 +157,13 @@ class ConfigWriter:
     def deactivate_apps(self, models: list[ModelContext]) -> None:
         names_model_to_deactivate = [model.app_name for model in models]
         for app in self._apps:
-            if app.get("name") in names_model_to_deactivate:
-                app["deployments"][0]["user_config"]["is_active"] = False
-                if app["args"]["gpus_per_replica"] == 1:
-                    app["deployments"][0]["ray_actor_options"]["num_gpus"] = 0
-                else:
-                    app["deployments"][0]["placement_group_bundles"] = [{"CPU": 1}]
+            if app.get("name") not in names_model_to_deactivate:
+                continue
+            app["deployments"][0]["user_config"]["is_active"] = False
+            if app["args"]["gpus_per_replica"] == 1:
+                app["deployments"][0]["ray_actor_options"]["num_gpus"] = 0
+            else:
+                app["deployments"][0]["placement_group_bundles"] = [{"CPU": 1}]
 
         self.apply_config()
         self._logger.info(f"Apps: {names_model_to_deactivate} deactivated.")

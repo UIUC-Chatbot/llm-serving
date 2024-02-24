@@ -61,6 +61,7 @@ class _AdminRequest(BaseModel):
     model_name: str = "meta-llama/Llama-2-7b-chat-hf"
     model_type: str = "vllm_openai"
     gpus_per_replica: int = 1
+    force: bool = False
 
 
 main_app = FastAPI()
@@ -93,7 +94,7 @@ class ModelController:
                 self._model_reference: dict = {}
         else:
             self._model_reference: dict = {}
-        self._num_gpus: int = ray.cluster_resources().get("GPU", 0)
+        self._num_gpus: int = int(ray.cluster_resources().get("GPU", 0))
         self._logger.info(f"ModelController initialized with {self._num_gpus} GPUs.")
         self._num_served_models: int = 0
 
@@ -113,12 +114,9 @@ class ModelController:
         self._config_writer.apply_config()
         self._logger.info("LLM Service initialized.")
 
-    def get_num_gpus(self) -> int:
-        return self._num_gpus
-
-    async def set_num_gpus(self, num_gpus: int) -> int:
+    async def update_num_gpus(self) -> int:
         async with self._lock:
-            self._num_gpus = min(num_gpus, ray.cluster_resources().get("GPU", 0))
+            self._num_gpus = int(ray.cluster_resources().get("GPU", 0))
         self._logger.info(f"Number of GPUs set to {self._num_gpus}.")
         return self._num_gpus
 
@@ -127,8 +125,8 @@ class ModelController:
         Return the number of available GPUs.
         """
         used_gpus: int = 0
-        for model_name in self._model_pool.keys():
-            used_gpus += self._model_pool[model_name].used_gpus
+        for model in self._model_pool.values():
+            used_gpus += model.num_active_replicas * model.gpus_per_replica
         return self._num_gpus - used_gpus
 
     async def _get_healthy_model(self, model: ModelContext) -> ModelContext | None:
@@ -182,7 +180,11 @@ class ModelController:
                     return None
 
     async def get_or_register_model(
-        self, model_name: str, model_type: ModelType, gpus_per_replica: int
+        self,
+        model_name: str,
+        model_type: ModelType,
+        gpus_per_replica: int = 1,
+        force: bool = False,
     ) -> ModelContext | None:
         """
         Return a healthy model_context of the requested model. Create a serve app for the model
@@ -190,14 +192,20 @@ class ModelController:
         Return None if model deployment is unhealthy.
         """
         if model_name in self._model_pool:
-            return await self._get_healthy_model(self._model_pool[model_name])
+            model = await self._get_healthy_model(self._model_pool[model_name])
+            if model is not None:
+                if model.num_active_replicas == 0 and force:
+                    await self.handle_unavailable_model(model.model_name)
+                return model
+            else:
+                return None
 
         if model_name in self._model_unsupported:
             return None
 
         if gpus_per_replica > self._num_gpus:
             self._model_unsupported[model_name] = (
-                f"Insufficient GPU resources for model {model_name}."
+                f"Insufficient GPU resources for model {model_name} which requires {gpus_per_replica} GPUs."
             )
             return None
 
@@ -216,11 +224,11 @@ class ModelController:
                 )
                 model.status_reset()
                 self._num_served_models += 1
-                if self._count_available_gpus() >= gpus_per_replica:
-                    model.used_gpus = gpus_per_replica
+                if force or self._count_available_gpus() >= gpus_per_replica:
+                    model.num_active_replicas = 1
                     self._config_writer.add_app(model=model, is_active=True)
                 else:
-                    model.used_gpus = 0
+                    model.num_active_replicas = 0
                     self._config_writer.add_app(model=model, is_active=False)
                 self._model_pool[model_name] = model
 
@@ -279,11 +287,11 @@ class ModelController:
         if models_out is not None:
             self._config_writer.deactivate_apps(models_out)
             for model_out in models_out:
-                model_out.used_gpus = 0
+                model_out.num_active_replicas = 0
                 model_out.status_reset()
                 asyncio.create_task(self._get_healthy_model(model_out))
         self._config_writer.activate_app(model_in)
-        model_in.used_gpus = model_in.gpus_per_replica
+        model_in.num_active_replicas = 1
         model_in.status_reset()
         asyncio.create_task(self._get_healthy_model(model_in))
 
@@ -323,12 +331,12 @@ class ModelController:
         for model in self._model_pool.values():
             if model.app_name == initiator.app_name:
                 continue
-            if model.used_gpus == 0:
+            if model.num_active_replicas == 0:
                 continue
             candidates.append(get_candidate(model))
 
         candidate_reports = await asyncio.gather(*candidates)
-        available_candidates = [
+        available_candidates: list[tuple[ModelContext, float]] = [
             candidate for candidate in candidate_reports if candidate is not None
         ]
 
@@ -338,7 +346,9 @@ class ModelController:
         victims: list[ModelContext] = []
         for candidate in available_candidates:
             victims.append(candidate[0])
-            num_gpus_to_release += candidate[0].used_gpus
+            num_gpus_to_release += (
+                candidate[0].num_active_replicas * candidate[0].gpus_per_replica
+            )
             if num_gpus_to_release + available_gpus >= required_gpus:
                 break
 
@@ -357,7 +367,7 @@ class ModelController:
         """
         self._logger.info(f"Trying to load model {model_name} into GPUs.")
         model = self._model_pool[model_name]
-        if model.used_gpus > 0:
+        if model.num_active_replicas > 0:
             return  # If the model is already loaded, ignore this request.
         available_gpus = self._count_available_gpus()
         if available_gpus >= model.gpus_per_replica:
@@ -403,6 +413,7 @@ class ModelController:
                     model_name=request.model_name,
                     model_type=model_type,
                     gpus_per_replica=request.gpus_per_replica,
+                    force=request.force,
                 )
                 if model is not None:
                     return f"Model {model.model_name} endpoint: {model.route_prefix}"
@@ -427,7 +438,7 @@ class ModelController:
                             "model_type": model.model_type,
                             "route_prefix": model.route_prefix,
                             "gpus_per_replica": model.gpus_per_replica,
-                            "used_gpus": model.used_gpus,
+                            "num_active_replicas": model.num_active_replicas,
                         }
                     )
 

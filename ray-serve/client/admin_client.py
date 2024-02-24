@@ -9,13 +9,16 @@ class AdminClient:
         self._endpoint: str = endpoint
         self._key: str = key
 
-    def get_model_route(self, model_name: str, model_type: str, num_gpus: int) -> str:
+    def get_model_route(
+        self, model_name: str, model_type: str, num_gpus: int, force: bool
+    ) -> str:
         data = {
             "key": self._key,
             "mode": "get",
             "model_name": model_name,
             "model_type": model_type,
             "gpus_per_replica": num_gpus,
+            "force": force,
         }
         response = requests.post(self._endpoint, json=data)
         return response.text
@@ -86,6 +89,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("--model-type", help="Model Type", type=str, default="vllm_raw")
     parser.add_argument("--num-gpus", type=int, default=1)
+    parser.add_argument("-f", "--force", help="Force Load", action="store_true")
     parser.add_argument("--config-dump-path", type=str, default="latest_config.yaml")
     args = parser.parse_args()
 
@@ -94,7 +98,7 @@ if __name__ == "__main__":
     if args.mode == 0:
         print(f"Requesting route for model {args.model_name}")
         res = admin_client.get_model_route(
-            args.model_name, args.model_type, args.num_gpus
+            args.model_name, args.model_type, args.num_gpus, args.force
         )
         print(res)
 

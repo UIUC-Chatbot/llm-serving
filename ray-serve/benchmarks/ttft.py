@@ -1,5 +1,4 @@
 import argparse
-from client.admin_client import AdminClient
 from openai import OpenAI
 import time
 
@@ -26,7 +25,9 @@ res = client.chat.completions.create(
 start_time = time.time()
 res = client.chat.completions.create(
     model=args.model_name,
-    messages=[{"role": "user", "content": "Tell me 10 jokes, please."}],
+    messages=[
+        {"role": "user", "content": "Tell me a really really long story, please."}
+    ],
     max_tokens=1000,
     stream=True,
 )

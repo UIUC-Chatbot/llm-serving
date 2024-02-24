@@ -38,20 +38,20 @@ class Daemon:
 
         self._logger.info(f"Daemon initialized with controller {controller}")
         asyncio.create_task(self._check_service_status(health_check_period))
-        asyncio.create_task(self._count_gpus(gpu_check_period))
+        asyncio.create_task(self._watch_gpus(gpu_check_period))
         asyncio.create_task(
             self._dump_current_config("current_config.yaml", dump_period)
         )
 
-    async def _count_gpus(self, check_period: int) -> None:
+    async def _watch_gpus(self, check_period: int) -> None:
+        self._num_gpus: int = await self._controller.update_num_gpus.remote()
         while True:
-            num_total_gpus: int = await self._controller.get_num_gpus.remote()
             gpus_available_in_ray: int = ray.cluster_resources().get("GPU", 0)
-            if num_total_gpus != gpus_available_in_ray:
+            if self._num_gpus != gpus_available_in_ray:
                 self._logger.info(
-                    f"LLM service has claimed {num_total_gpus} GPUs. There are {gpus_available_in_ray} GPUs available in Ray, updating service."
+                    f"LLM service has claimed {self._num_gpus} GPUs. There are {gpus_available_in_ray} GPUs available in Ray, updating service."
                 )
-                await self._controller.set_num_gpus.remote(gpus_available_in_ray)
+                self._num_gpus = await self._controller.update_num_gpus.remote()
             await asyncio.sleep(check_period)
 
     async def _check_service_status(self, check_period: int):
