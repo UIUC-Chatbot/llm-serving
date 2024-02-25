@@ -3,7 +3,7 @@
 ## Usage
 
 1. Navigate to **/ray-serve/llm_service**.
-1. Start Ray cluster, e.g. `ray start --head --num-gpus=$(GPU_COUNT) --resources='{"head_agents": 2}'`.  
+1. Start Ray cluster, e.g. `ray start --head --disable-usage-stats --resources='{"head_agents": 2}' --num-gpus=$(GPU_COUNT)`.  
     - `head_agent` is a custom resource that is used to force some important processes to be deployed on the head node.
     - `import_path` depends on the location where Ray was started.
 1. Use [**config file**](https://docs.ray.io/en/latest/serve/production-guide/config.html#serve-in-production-config-file) to specify the model and the serving configuration.

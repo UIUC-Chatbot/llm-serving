@@ -27,9 +27,10 @@ class Daemon:
     def __init__(
         self,
         controller: str,
-        health_check_period: int,
-        gpu_check_period: int,
+        clean_period: int,
         dump_period: int,
+        gpu_check_period: int,
+        health_check_period: int,
     ) -> None:
         time.sleep(90)  # ModelController might take a while to start, wait for it
         self._controller: DeploymentHandle = serve.get_app_handle(controller)
@@ -37,11 +38,12 @@ class Daemon:
         self._watch_list: dict[str, int] = {}
 
         self._logger.info(f"Daemon initialized with controller {controller}")
-        asyncio.create_task(self._check_service_status(health_check_period))
-        asyncio.create_task(self._watch_gpus(gpu_check_period))
+        asyncio.create_task(self._clean_unpopular_models(clean_period))
         asyncio.create_task(
             self._dump_current_config("current_config.yaml", dump_period)
         )
+        asyncio.create_task(self._watch_gpus(gpu_check_period))
+        asyncio.create_task(self._check_service_status(health_check_period))
 
     async def _watch_gpus(self, check_period: int) -> None:
         self._num_gpus: int = await self._controller.update_num_gpus.remote()
@@ -54,7 +56,7 @@ class Daemon:
                 self._num_gpus = await self._controller.update_num_gpus.remote()
             await asyncio.sleep(check_period)
 
-    async def _check_service_status(self, check_period: int):
+    async def _check_service_status(self, check_period: int) -> None:
         while True:
             app_status: dict = serve.status().applications
             for app_name, app in app_status.items():
@@ -79,7 +81,12 @@ class Daemon:
                         self._logger.warning(
                             f"Unhealthy App {app_name} has been removed."
                         )
+            await asyncio.sleep(check_period)
 
+    async def _clean_unpopular_models(self, check_period: int) -> None:
+        while True:
+            self._logger.info("Cleaning unpopular models.")
+            self._controller.clean_unpopular_models.remote()
             await asyncio.sleep(check_period)
 
     async def _dump_current_config(self, dump_path: str, dump_period: int) -> None:
@@ -92,15 +99,17 @@ class Daemon:
 
 class _DaemonArgs(BaseModel):
     controller: str
-    health_check_period: int  # time period between health checks, in seconds
-    gpu_check_period: int  # time period between GPU checks, in seconds
+    clean_period: int  # time period between model cleanups, in seconds
     dump_period: int  # time period between config file dumps, in seconds
+    gpu_check_period: int  # time period between GPU checks, in seconds
+    health_check_period: int  # time period between health checks, in seconds
 
 
 def app_builder(args: _DaemonArgs) -> Application:
     return Daemon.bind(
         args.controller,
-        args.health_check_period,
-        args.gpu_check_period,
+        args.clean_period,
         args.dump_period,
+        args.gpu_check_period,
+        args.health_check_period,
     )

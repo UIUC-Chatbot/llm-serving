@@ -18,7 +18,7 @@ class AdminClient:
             "model_name": model_name,
             "model_type": model_type,
             "gpus_per_replica": num_gpus,
-            "force": force,
+            "force_load": force,
         }
         response = requests.post(self._endpoint, json=data)
         return response.text

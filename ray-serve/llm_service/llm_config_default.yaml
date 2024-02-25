@@ -18,6 +18,7 @@ applications:
   import_path: model_pool:app_builder
   args:
     config_file_path: llm_config_default.yaml
+    has_autoscaler: false
     model_reference_path: model_reference.json
   runtime_env: {}
   deployments:
@@ -28,9 +29,10 @@ applications:
   import_path: model_daemon:app_builder
   args:
     controller: llm-serving
-    health_check_period: 50
-    gpu_check_period: 20
+    clean_period: 600
     dump_period: 600
+    gpu_check_period: 10
+    health_check_period: 65
   runtime_env: {}
   deployments:
   - name: Daemon

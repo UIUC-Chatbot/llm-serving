@@ -8,6 +8,7 @@ import ray
 from ray import serve
 from ray.serve import Application
 from ray.serve.exceptions import RayServeException
+import time
 from typing import AsyncGenerator
 from vllm.entrypoints.openai.protocol import ChatCompletionRequest
 
@@ -61,7 +62,7 @@ class _AdminRequest(BaseModel):
     model_name: str = "meta-llama/Llama-2-7b-chat-hf"
     model_type: str = "vllm_openai"
     gpus_per_replica: int = 1
-    force: bool = False
+    force_load: bool = False
 
 
 main_app = FastAPI()
@@ -79,19 +80,19 @@ class ModelController:
     dashboard service, which might not be accessible from worker nodes.
     """
 
-    def __init__(self, config_file_path: str, model_reference_path: str | None) -> None:
+    def __init__(
+        self,
+        config_file_path: str,
+        has_autoscaler: bool,
+        model_reference_path: str | None,
+    ) -> None:
         self._config_writer: ConfigWriter = ConfigWriter(config_file_path)
+        self._has_autoscaler: bool = has_autoscaler
         self._logger: Logger = getLogger("ray.serve")
         self._model_pool: dict[str, ModelContext] = {}  # Currently registered models
         self._model_unsupported: dict[str, str] = {}  # Unsupported models
-        if model_reference_path is not None:  # Number of GPUs required for large models
-            try:
-                with open(model_reference_path, "r") as f:
-                    self._model_reference: dict = json.load(f)
-                self._logger.info(f"{model_reference_path} successfully loaded.")
-            except FileNotFoundError:
-                self._logger.warning(f"{model_reference_path} not found.")
-                self._model_reference: dict = {}
+        if model_reference_path is not None:
+            self.load_model_reference(model_reference_path)
         else:
             self._model_reference: dict = {}
         self._num_gpus: int = int(ray.cluster_resources().get("GPU", 0))
@@ -99,9 +100,10 @@ class ModelController:
         self._num_served_models: int = 0
 
         """
-        The modification of the model pool should be atomic.
+        Modifications of the model pool should be atomic.
         If some coroutines need to modify the model pool and execute await statements during the
         modification process (yield control to the event loop), they must acquire the lock.
+        Read operations don't need to acquire the lock.
         """
         self._lock: asyncio.Lock = asyncio.Lock()
 
@@ -114,6 +116,19 @@ class ModelController:
         self._config_writer.apply_config()
         self._logger.info("LLM Service initialized.")
 
+    def load_model_reference(self, model_reference_path: str) -> None:
+        """
+        model_reference is a file that contains important information about the models, such as the
+        number of GPUs required for each model.
+        """
+        try:
+            with open(model_reference_path, "r") as f:
+                self._model_reference = json.load(f)
+            self._logger.info(f"{model_reference_path} successfully loaded.")
+        except FileNotFoundError:
+            self._model_reference = {}
+            self._logger.warning(f"{model_reference_path} not found.")
+
     async def update_num_gpus(self) -> int:
         async with self._lock:
             self._num_gpus = int(ray.cluster_resources().get("GPU", 0))
@@ -123,90 +138,130 @@ class ModelController:
     def _count_available_gpus(self) -> int:
         """
         Return the number of available GPUs.
+        It might return a negative number if the used GPUs exceed the total number of GPUs, which
+        usually happens when some nodes are down.
         """
         used_gpus: int = 0
         for model in self._model_pool.values():
             used_gpus += model.num_active_replicas * model.gpus_per_replica
         return self._num_gpus - used_gpus
 
-    async def _get_healthy_model(self, model: ModelContext) -> ModelContext | None:
+    async def _validate_deployment(self, model: ModelContext) -> bool:
         """
-        Check if the model is healthy. If the model is unhealthy, remove it from the model pool.
-        Return model context if the model is healthy, None otherwise.
-        This function should be called before calling a model app handle.
-        """
-        model_status: ModelStatus = await model.get_cached_status()
-        match model_status:
-            case ModelStatus.RUNNING:
-                return model
-            case ModelStatus.DEPLOY_FAILED:
-                async with self._lock:
-                    # Check whether the app exists because someone else might have removed it.
-                    if model.model_name not in self._model_pool:
-                        return None
-                    if model.app_name != self._model_pool[model.model_name].app_name:
-                        """
-                        In rare cases, the app corresponding to the current model context has been
-                        removed, but a new app with the same model name has been created, therefore
-                        the model name can be found in the model pool, but the app name is
-                        different.
-                        """
-                        return None
+        Validate the deployment of the given model. This function should be called each time a model is deployed.
+        If this function is called concurrently, only one function instance checks the model
+        deployment status, and the rest will wait for them to finish.
 
-                    # If the deployment fails, then it is very likely something went wrong in the
-                    # initialization function, so we should add this model to unsupported list.
+        - If the model is unhealthy, remove it from the model pool.
+        - If the model is pending for a long time, deactivate it.
+
+        Return true if the model is running, false otherwise.
+        """
+
+        def is_model_in_pool(model_context: ModelContext) -> bool:
+            # Check whether the model app exists because someone else might have removed it.
+            model_name: str = model_context.model_name
+            if model_name not in self._model_pool:
+                return False
+
+            """
+            In rare cases, the app corresponding to the current model context has been removed, but
+            a new app with the same model name has been created, therefore the model name can be
+            found in the model pool, but the app name is different.
+            """
+            if model_context.app_name != self._model_pool[model_name].app_name:
+                return False
+            return True
+
+        if model.is_deployment_success is not None:
+            # The model has been checked before, return the result.
+            return model.is_deployment_success
+
+        if model.is_owned:  # Someone else has started checking the model.
+            while True:
+                await asyncio.sleep(1)
+                if model.is_owned:
+                    continue
+                if model.is_deployment_success is None:
+                    # There is no owner, but the model status has been cleared after previous check.
+                    # Recheck it!
+                    break
+                else:
+                    # The model has been checked by someone else, return the result.
+                    return model.is_deployment_success
+
+        # Only one function instance (owner) checks the model deployment status.
+        model.is_owned = True
+        while True:
+            try:
+                model_status: ModelStatus = await model.check_deployment_status()
+            except:
+                continue
+
+            if model_status == ModelStatus.RUNNING:
+                model.is_owned = False
+                model.is_deployment_success = True
+                return True
+
+            elif model_status == ModelStatus.PENDING:
+                # The model has been waiting for resources for a long time, deactivate it.
+                async with self._lock:
+                    self._logger.warning(
+                        f"App {model.app_name} has been waiting for resources for a long time, deactivate it."
+                    )
+                    self._deactivate_models([model])
+
+            elif model_status == ModelStatus.DEPLOY_FAILED:
+                async with self._lock:
+                    model.is_owned = False
+                    model.is_deployment_success = False
+                    if not is_model_in_pool(model):
+                        return False
+                    """
+                    If the deployment fails, then it is very likely something went wrong in the
+                    initialization function, so we should add this model to unsupported list.
+                    """
                     self._model_unsupported[model.model_name] = model.error_msg
                     self._logger.warning(f"App {model.app_name} deployment failed.")
                     self._config_writer.remove_app(model)
                     self._model_pool.pop(model.model_name)
-                    return None
-            case _:
-                async with self._lock:
-                    # Check whether the app exists because someone else might have removed it.
-                    if model.model_name not in self._model_pool:
-                        return None
-                    if model.app_name != self._model_pool[model.model_name].app_name:
-                        """
-                        In rare cases, the app corresponding to the current model context has been
-                        removed, but a new app with the same model name has been created, therefore
-                        the model name can be found in the model pool, but the app name is
-                        different.
-                        """
-                        return None
+                    return False
 
+            else:
+                async with self._lock:
+                    model.is_owned = False
+                    model.is_deployment_success = False
+                    if not is_model_in_pool(model):
+                        return False
                     self._logger.warning(f"App {model.app_name} is {model_status}.")
                     self._config_writer.remove_app(model)
                     self._model_pool.pop(model.model_name)
-                    return None
+                    return False
 
     async def get_or_register_model(
         self,
         model_name: str,
         model_type: ModelType,
         gpus_per_replica: int = 1,
-        force: bool = False,
+        force_load: bool = False,
     ) -> ModelContext | None:
         """
-        Return a healthy model_context of the requested model. Create a serve app for the model
-        if it's not created yet.
-        Return None if model deployment is unhealthy.
+        Return a healthy model_context of the requested model. Create a serve app for the model if
+        it's not created yet. Return None if the model deployment is unhealthy.
         """
         if model_name in self._model_pool:
-            model = await self._get_healthy_model(self._model_pool[model_name])
-            if model is not None:
-                if model.num_active_replicas == 0 and force:
-                    await self.handle_unavailable_model(model.model_name)
-                return model
-            else:
+            model: ModelContext = self._model_pool[model_name]
+            if not await self._validate_deployment(model):
                 return None
+            if model.num_active_replicas == 0 and force_load:
+                # If the model is inactive and force_load is True, try to load it into GPUs.
+                async with self._lock:
+                    self._activate_model(model)
+                if not await self._validate_deployment(model):
+                    return None
+            return model
 
         if model_name in self._model_unsupported:
-            return None
-
-        if gpus_per_replica > self._num_gpus:
-            self._model_unsupported[model_name] = (
-                f"Insufficient GPU resources for model {model_name} which requires {gpus_per_replica} GPUs."
-            )
             return None
 
         # Create a new serve app for the requested model
@@ -222,9 +277,13 @@ class ModelController:
                     model_type=model_type,
                     gpus_per_replica=gpus_per_replica,
                 )
-                model.status_reset()
+                model.deployment_status_reset()
                 self._num_served_models += 1
-                if force or self._count_available_gpus() >= gpus_per_replica:
+                if (
+                    self._count_available_gpus() >= gpus_per_replica
+                    or force_load
+                    or self._has_autoscaler
+                ):
                     model.num_active_replicas = 1
                     self._config_writer.add_app(model=model, is_active=True)
                 else:
@@ -232,7 +291,17 @@ class ModelController:
                     self._config_writer.add_app(model=model, is_active=False)
                 self._model_pool[model_name] = model
 
-        return await self._get_healthy_model(model)
+        """
+        Start a background coroutine to check if the model deployment is healthy. Because
+        users might cancel this request, causing the current function to be cancelled before
+        we validate the deployment.
+        """
+        asyncio.create_task(self._validate_deployment(model))
+
+        if await self._validate_deployment(model):
+            return model
+        else:
+            return None
 
     async def delete_model_by_model_name(self, model_name: str) -> bool:
         """
@@ -275,25 +344,46 @@ class ModelController:
             self._model_unsupported.clear()
             self._logger.info("LLM service reset.")
 
-    def _load_or_replace_model(
-        self, model_in: ModelContext, models_out: None | list[ModelContext] = None
-    ) -> None:
+    def _activate_model(self, model: ModelContext) -> None:
         """
-        Loads model_in into GPU. Unloads model_out from GPU if necessary.
         It's the caller's responsibility to ensure the availability of GPU resources.
-        This function does not verify whether deactivating model_out actually releases GPU
-        resources, nor does it check for the availability of any GPU.
+        This function does not verify the availability of any GPU.
         """
-        if models_out is not None:
-            self._config_writer.deactivate_apps(models_out)
-            for model_out in models_out:
-                model_out.num_active_replicas = 0
-                model_out.status_reset()
-                asyncio.create_task(self._get_healthy_model(model_out))
-        self._config_writer.activate_app(model_in)
-        model_in.num_active_replicas = 1
-        model_in.status_reset()
-        asyncio.create_task(self._get_healthy_model(model_in))
+        self._config_writer.activate_app(model)
+        model.num_active_replicas = 1
+        model.activation_status_reset()
+        model.deployment_status_reset()
+        # Start a background coroutine to check if the model deployment is healthy
+        asyncio.create_task(self._validate_deployment(model))
+
+    def _deactivate_models(self, models: list[ModelContext]) -> None:
+        self._config_writer.deactivate_apps(models)
+        for model in models:
+            model.num_active_replicas = 0
+            model.deployment_status_reset()
+            # Start a background coroutine to check if the model deployment is healthy
+            asyncio.create_task(self._validate_deployment(model))
+
+    async def _gather_metrics(
+        self, model: ModelContext
+    ) -> tuple[ModelContext, float] | None:
+        try:
+            """
+            The caller of this function owns the lock, so we don't want this function to block
+            for too long. We set a timeout and ignore the model if it doesn't respond in time.
+            """
+            metrics = await asyncio.wait_for(
+                model.app_handle.collect_eviction_defense_metrics.remote(),
+                timeout=10,
+            )
+            return model, metrics["last_served_time"]
+        except (
+            AttributeError,
+            RayServeException,
+            TimeoutError,
+            asyncio.TimeoutError,
+        ):
+            return None
 
     async def _select_victim(
         self, initiator: ModelContext, required_gpus: int, available_gpus: int
@@ -306,34 +396,13 @@ class ModelController:
         service information.
         """
 
-        async def get_candidate(
-            model: ModelContext,
-        ) -> tuple[ModelContext, float] | None:
-            try:
-                """
-                The caller of this function owns the lock, so we don't want this function to block
-                for too long. We set a timeout and ignore the model if it doesn't respond in time.
-                """
-                metrics = await asyncio.wait_for(
-                    model.app_handle.collect_eviction_defense_metrics.remote(),
-                    timeout=10,
-                )
-                return model, metrics["last_served_time"]
-            except (
-                AttributeError,
-                RayServeException,
-                TimeoutError,
-                asyncio.TimeoutError,
-            ):
-                return None
-
         candidates = []
         for model in self._model_pool.values():
             if model.app_name == initiator.app_name:
                 continue
             if model.num_active_replicas == 0:
                 continue
-            candidates.append(get_candidate(model))
+            candidates.append(self._gather_metrics(model))
 
         candidate_reports = await asyncio.gather(*candidates)
         available_candidates: list[tuple[ModelContext, float]] = [
@@ -365,28 +434,73 @@ class ModelController:
         It tries its best to unload some models to make room for the requested model, but there is
         no guarantee that the requested model will be loaded into GPU.
         """
-        self._logger.info(f"Trying to load model {model_name} into GPUs.")
         model = self._model_pool[model_name]
-        if model.num_active_replicas > 0:
-            return  # If the model is already loaded, ignore this request.
-        available_gpus = self._count_available_gpus()
-        if available_gpus >= model.gpus_per_replica:
-            return self._load_or_replace_model(model)
 
-        # If there is no available GPU, evict models from GPUs and load the requested model.
-        self._logger.info(
-            f"Model {model_name} requires {model.gpus_per_replica - available_gpus} more GPUs, trying to evict other models."
-        )
+        if model.num_active_replicas > 0:
+            return  # If the model is already activated, ignore this request.
+
         async with self._lock:
+            if model.num_active_replicas > 0:
+                return  # If the model is already activated, ignore this request.
+
+            self._logger.info(f"Trying to load model {model_name} into GPUs.")
+
+            available_gpus = self._count_available_gpus()
+            if available_gpus >= model.gpus_per_replica:
+                return self._activate_model(model)
+
+            self._logger.info(
+                f"Model {model_name} requires {model.gpus_per_replica - available_gpus} more GPUs, which are not available."
+            )
+
+            # At this point, there are no resources available for the model.
+            # Let's try deploying it anyway and see if the auto-scaler can allocate more resources.
+            if self._has_autoscaler and not model.activation_failed:
+                self._logger.info(
+                    f"Trying to deploy model {model_name} even if there are no available GPUs."
+                )
+                return self._activate_model(model)
+
+            # Auto-scaler doesn't have enough resources, we need to evict some victims from GPUs.
+            self._logger.info(
+                f"Trying to evict some models to make room for model {model_name}."
+            )
             victims: list[ModelContext] | None = await self._select_victim(
                 initiator=model,
                 required_gpus=model.gpus_per_replica,
                 available_gpus=available_gpus,
             )
             if victims is None:
-                self._logger.info(f"Resource unavailable for model {model_name}.")
+                self._logger.info(
+                    f"Resource unavailable for activating model {model_name}."
+                )
             else:
-                self._load_or_replace_model(model, victims)
+                self._deactivate_models(victims)
+                self._activate_model(model)
+
+    async def clean_unpopular_models(self) -> None:
+        candidates = []
+        unpopular_models: list[ModelContext] = []
+
+        async with self._lock:
+            for model in self._model_pool.values():
+                candidates.append(self._gather_metrics(model))
+            candidate_reports = await asyncio.gather(*candidates)
+            available_candidates: list[tuple[ModelContext, float]] = [
+                candidate for candidate in candidate_reports if candidate is not None
+            ]
+
+            now = time.time()
+            for candidate in available_candidates:
+                # The model has not been used for a long time
+                if now - candidate[1] > 300:
+                    unpopular_models.append(candidate[0])
+
+        for model in unpopular_models:
+            self._logger.info(
+                f"Remove {model.model_name} because it has not been used for a long time."
+            )
+            await self.delete_model_by_model_name(model.model_name)
 
     def get_current_config(self) -> dict:
         return self._config_writer.get_current_config()
@@ -413,7 +527,7 @@ class ModelController:
                     model_name=request.model_name,
                     model_type=model_type,
                     gpus_per_replica=request.gpus_per_replica,
-                    force=request.force,
+                    force_load=request.force_load,
                 )
                 if model is not None:
                     return f"Model {model.model_name} endpoint: {model.route_prefix}"
@@ -458,6 +572,7 @@ class ModelController:
 
             case "info":
                 return {
+                    "has_autoscaler": self._has_autoscaler,
                     "num_total_gpus": self._num_gpus,
                     "num_available_gpus:": self._count_available_gpus(),
                     "num_served_models": self._num_served_models,
@@ -571,13 +686,16 @@ class ModelController:
             else:
                 return await create_batch_request(model)
 
-        return await retry_func(main_func, 3)
+        return await retry_func(main_func, 2)
 
 
 class _ControllerArgs(BaseModel):
     config_file_path: str
+    has_autoscaler: bool = False
     model_reference_path: str | None = None
 
 
 def app_builder(args: _ControllerArgs) -> Application:
-    return ModelController.bind(args.config_file_path, args.model_reference_path)
+    return ModelController.bind(
+        args.config_file_path, args.has_autoscaler, args.model_reference_path
+    )

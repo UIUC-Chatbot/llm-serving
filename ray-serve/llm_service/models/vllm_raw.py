@@ -63,7 +63,9 @@ class ModelApp(ModelAppInterface):
         self._is_active: bool = config["is_active"]
         if self._is_active:
             self._model = LLM(
-                model=self._model_name, tensor_parallel_size=self._gpus_per_replica
+                model=self._model_name,
+                tensor_parallel_size=self._gpus_per_replica,
+                trust_remote_code=True,
             )
         else:
             self._model = None
