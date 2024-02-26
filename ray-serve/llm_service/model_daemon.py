@@ -38,12 +38,28 @@ class Daemon:
         self._watch_list: dict[str, int] = {}
 
         self._logger.info(f"Daemon initialized with controller {controller}")
-        asyncio.create_task(self._clean_unpopular_models(clean_period))
-        asyncio.create_task(
-            self._dump_current_config("current_config.yaml", dump_period)
-        )
-        asyncio.create_task(self._watch_gpus(gpu_check_period))
-        asyncio.create_task(self._check_service_status(health_check_period))
+
+        if clean_period > 0:
+            self._logger.info(
+                f"Cleaning unpopular models every {clean_period} seconds."
+            )
+            asyncio.create_task(self._clean_unpopular_models(clean_period))
+
+        if dump_period > 0:
+            self._logger.info(f"Dumping current config every {dump_period} seconds.")
+            asyncio.create_task(
+                self._dump_current_config("current_config.yaml", dump_period)
+            )
+
+        if gpu_check_period > 0:
+            self._logger.info(f"Watching GPUs every {gpu_check_period} seconds.")
+            asyncio.create_task(self._watch_gpus(gpu_check_period))
+
+        if health_check_period > 0:
+            self._logger.info(
+                f"Checking service status every {health_check_period} seconds."
+            )
+            asyncio.create_task(self._check_service_status(health_check_period))
 
     async def _watch_gpus(self, check_period: int) -> None:
         self._num_gpus: int = await self._controller.update_num_gpus.remote()
