@@ -193,10 +193,7 @@ class ModelController:
         # Only one function instance (owner) checks the model deployment status.
         model.is_owned = True
         while True:
-            try:
-                model_status: ModelStatus = await model.check_deployment_status()
-            except:
-                continue
+            model_status: ModelStatus = await model.check_deployment_status()
 
             if model_status == ModelStatus.RUNNING:
                 model.is_owned = False
@@ -251,13 +248,13 @@ class ModelController:
         """
         if model_name in self._model_pool:
             model: ModelContext = self._model_pool[model_name]
-            if not await self._validate_deployment(model):
+            if not await asyncio.shield(self._validate_deployment(model)):
                 return None
             if model.num_active_replicas == 0 and force_load:
                 # If the model is inactive and force_load is True, try to load it into GPUs.
                 async with self._lock:
                     self._activate_model(model)
-                if not await self._validate_deployment(model):
+                if not await asyncio.shield(self._validate_deployment(model)):
                     return None
             return model
 
@@ -296,9 +293,10 @@ class ModelController:
         users might cancel this request, causing the current function to be cancelled before
         we validate the deployment.
         """
-        asyncio.create_task(self._validate_deployment(model))
+        background_task = asyncio.create_task(self._validate_deployment(model))
+        asyncio.shield(background_task)
 
-        if await self._validate_deployment(model):
+        if await asyncio.shield(self._validate_deployment(model)):
             return model
         else:
             return None
@@ -354,7 +352,8 @@ class ModelController:
         model.activation_status_reset()
         model.deployment_status_reset()
         # Start a background coroutine to check if the model deployment is healthy
-        asyncio.create_task(self._validate_deployment(model))
+        background_task = asyncio.create_task(self._validate_deployment(model))
+        asyncio.shield(background_task)
 
     def _deactivate_models(self, models: list[ModelContext]) -> None:
         self._config_writer.deactivate_apps(models)
@@ -362,7 +361,8 @@ class ModelController:
             model.num_active_replicas = 0
             model.deployment_status_reset()
             # Start a background coroutine to check if the model deployment is healthy
-            asyncio.create_task(self._validate_deployment(model))
+            background_task = asyncio.create_task(self._validate_deployment(model))
+            asyncio.shield(background_task)
 
     async def _gather_metrics(
         self, model: ModelContext
