@@ -1,4 +1,5 @@
 import asyncio
+import datetime
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse, StreamingResponse, Response
 import json
@@ -239,6 +240,7 @@ class ModelController:
         self,
         model_name: str,
         model_type: ModelType,
+        priority: int,
         gpus_per_replica: int = 1,
         force_load: bool = False,
     ) -> ModelContext | None:
@@ -270,8 +272,9 @@ class ModelController:
                 model = ModelContext(
                     app_name=f"{model_name.replace('/', '--')}--{self._num_served_models}",
                     model_name=model_name,
-                    route_prefix=f"/model-{self._num_served_models}",
                     model_type=model_type,
+                    priority=priority,
+                    route_prefix=f"/model-{self._num_served_models}",
                     gpus_per_replica=gpus_per_replica,
                 )
                 model.deployment_status_reset()
@@ -484,6 +487,12 @@ class ModelController:
 
         async with self._lock:
             for model in self._model_pool.values():
+                if model.priority > 0:
+                    now = datetime.datetime.now().time()
+                    morning = datetime.time(9, 0, 0)
+                    night = datetime.time(23, 0, 0)
+                    if now > morning and now < night:
+                        continue
                 candidates.append(self._gather_metrics(model))
             candidate_reports = await asyncio.gather(*candidates)
             available_candidates: list[tuple[ModelContext, float]] = [
@@ -523,10 +532,21 @@ class ModelController:
                     model_type = ModelType.VLLM_OPENAI
                 else:
                     return "Invalid model type. Aborting."
+                if request.model_name in self._model_reference:
+                    priority: int = self._model_reference[request.model_name][
+                        "priority"
+                    ]
+                    gpus_per_replica: int = self._model_reference[request.model_name][
+                        "gpus_per_replica"
+                    ]
+                else:
+                    priority: int = 0
+                    gpus_per_replica = 1
                 model = await self.get_or_register_model(
                     model_name=request.model_name,
                     model_type=model_type,
-                    gpus_per_replica=request.gpus_per_replica,
+                    priority=priority,
+                    gpus_per_replica=gpus_per_replica,
                     force_load=request.force_load,
                 )
                 if model is not None:
@@ -550,6 +570,7 @@ class ModelController:
                         {
                             "model_name": model.model_name,
                             "model_type": model.model_type,
+                            "priority": model.priority,
                             "route_prefix": model.route_prefix,
                             "gpus_per_replica": model.gpus_per_replica,
                             "num_active_replicas": model.num_active_replicas,
@@ -596,11 +617,19 @@ class ModelController:
         for model in self._model_pool.values():
             if model.num_active_replicas > 0:
                 hot_models.append(
-                    {"model_name": model.model_name, "route_prefix": model.route_prefix}
+                    {
+                        "model_name": model.model_name,
+                        "priority": model.priority,
+                        "route_prefix": model.route_prefix,
+                    }
                 )
             else:
                 cold_models.append(
-                    {"model_name": model.model_name, "route_prefix": model.route_prefix}
+                    {
+                        "model_name": model.model_name,
+                        "priority": model.priority,
+                        "route_prefix": model.route_prefix,
+                    }
                 )
 
         return {"hot_models": hot_models, "cold_models": cold_models}
@@ -681,12 +710,17 @@ class ModelController:
 
         async def main_func():
             if request.model in self._model_reference:
-                gpus_per_replica = self._model_reference[request.model]
+                priority: int = self._model_reference[request.model]["priority"]
+                gpus_per_replica: int = self._model_reference[request.model][
+                    "gpus_per_replica"
+                ]
             else:
+                priority: int = 0
                 gpus_per_replica = 1
             model = await self.get_or_register_model(
                 model_name=request.model,
                 model_type=ModelType.VLLM_OPENAI,
+                priority=priority,
                 gpus_per_replica=gpus_per_replica,
             )
             if model is None:

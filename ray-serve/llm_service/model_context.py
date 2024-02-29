@@ -39,8 +39,9 @@ class ModelContext:
         self,
         app_name: str,
         model_name: str,
-        route_prefix: str,
         model_type: ModelType,
+        priority: int,
+        route_prefix: str,
         gpus_per_replica: int,
     ) -> None:
         self.app_name: str = app_name
@@ -50,6 +51,7 @@ class ModelContext:
         self.is_owned: bool = False
         self.model_name: str = model_name
         self.model_type: ModelType = model_type
+        self.priority: int = priority  # The higher the number, the higher the priority
         self.route_prefix: str = route_prefix
         self.activation_failed: bool = False
         self.wrapper_name: str = "ModelApp"  # The name of the model deployment

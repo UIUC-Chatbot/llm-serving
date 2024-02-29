@@ -1,4 +1,5 @@
 import asyncio
+import datetime
 from fastapi import FastAPI
 from logging import getLogger, Logger
 from pydantic import BaseModel
@@ -8,6 +9,8 @@ from ray.serve import Application
 from ray.serve.handle import DeploymentHandle
 import time
 import yaml
+
+from model_context import ModelType
 
 
 daemon_app = FastAPI()
@@ -103,6 +106,19 @@ class Daemon:
         while True:
             self._logger.info("Cleaning unpopular models.")
             self._controller.clean_unpopular_models.remote()
+
+            now = datetime.datetime.now().time()
+            morning = datetime.time(9, 0, 0)
+            elapsed = datetime.time(9, 40, 0)
+            if now > morning and now < elapsed:
+                self._logger.info("Activate low-latency model.")
+                self._controller.get_or_register_model.remote(
+                    "NousResearch/Nous-Hermes-2-Mixtral-8x7B-DPO",
+                    ModelType.VLLM_OPENAI,
+                    1,
+                    2,
+                )
+
             await asyncio.sleep(check_period)
 
     async def _dump_current_config(self, dump_path: str, dump_period: int) -> None:

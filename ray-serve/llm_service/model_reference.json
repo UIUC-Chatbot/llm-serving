@@ -1,7 +1,22 @@
 {
-    "mistralai/Mixtral-8x7B-v0.1": 2,
-    "mistralai/Mixtral-8x7B-Instruct-v0.1": 2,
-    "meta-llama/Llama-2-70b-hf": 2,
-    "meta-llama/Llama-2-70b-chat-hf": 2,
-    "NousResearch/Nous-Hermes-2-Mixtral-8x7B-DPO": 2
+    "mistralai/Mixtral-8x7B-v0.1": {
+        "gpus_per_replica": 2,
+        "priority": 0
+    },
+    "mistralai/Mixtral-8x7B-Instruct-v0.1": {
+        "gpus_per_replica": 2,
+        "priority": 0
+    },
+    "meta-llama/Llama-2-70b-hf": {
+        "gpus_per_replica": 2,
+        "priority": 0
+    },
+    "meta-llama/Llama-2-70b-chat-hf": {
+        "gpus_per_replica": 2,
+        "priority": 0
+    },
+    "NousResearch/Nous-Hermes-2-Mixtral-8x7B-DPO": {
+        "gpus_per_replica": 2,
+        "priority": 1
+    }
 }
