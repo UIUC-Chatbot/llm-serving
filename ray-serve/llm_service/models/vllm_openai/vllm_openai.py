@@ -120,6 +120,7 @@ def parse_args(model_name: str, gpus_per_replica: int):
             "--trust-remote-code",
             "--tensor-parallel-size",
             f"{gpus_per_replica}",
+            "--enforce-eager",
         ]
     )
 
