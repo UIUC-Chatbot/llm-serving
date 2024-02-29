@@ -589,6 +589,22 @@ class ModelController:
             case _:
                 return "Invalid mode. Aborting."
 
+    @main_app.get("/hot-models")
+    def get_hot_models(self) -> dict:
+        hot_models = []
+        cold_models = []
+        for model in self._model_pool.values():
+            if model.num_active_replicas > 0:
+                hot_models.append(
+                    {"model_name": model.model_name, "route_prefix": model.route_prefix}
+                )
+            else:
+                cold_models.append(
+                    {"model_name": model.model_name, "route_prefix": model.route_prefix}
+                )
+
+        return {"hot_models": hot_models, "cold_models": cold_models}
+
     """
     OpenAI-ish API endpoints
     """
