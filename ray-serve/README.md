@@ -18,4 +18,4 @@ Some models are extremely large and cannot fit into a single GPU. We maintain a 
 
 ## Architecture
 
-Please read **/llm_service/model_pool.py**.
+Please read **model_pool.py**.
