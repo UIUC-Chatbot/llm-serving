@@ -178,23 +178,24 @@ class ModelController:
             # The model has been checked before, return the result.
             return model.is_deployment_success
 
-        if model.is_owned:  # Someone else has started checking the model.
-            while True:
-                await asyncio.sleep(1)
-                if model.is_owned:
-                    continue
-                if model.is_deployment_success is None:
-                    # There is no owner, but the model status has been cleared after previous check.
-                    # Recheck it!
-                    break
-                else:
-                    # The model has been checked by someone else, return the result.
-                    return model.is_deployment_success
+        while model.is_owned:  # Someone else has started checking the model.
+            self._logger.debug(
+                f"Waiting for the model {model.model_name} to be checked by another coroutine."
+            )
+            await asyncio.sleep(1)
+
+        if model.is_deployment_success is not None:
+            # The model has been checked by someone else, return the result.
+            return model.is_deployment_success
 
         # Only one function instance (owner) checks the model deployment status.
         model.is_owned = True
+        self._logger.debug(
+            f"Start checking the model {model.model_name} deployment status."
+        )
         while True:
             model_status: ModelStatus = await model.check_deployment_status()
+            self._logger.debug(f"App {model.app_name} is {model_status}.")
 
             if model_status == ModelStatus.RUNNING:
                 model.is_owned = False
@@ -290,14 +291,6 @@ class ModelController:
                     model.num_active_replicas = 0
                     self._config_writer.add_app(model=model, is_active=False)
                 self._model_pool[model_name] = model
-
-        """
-        Start a background coroutine to check if the model deployment is healthy. Because
-        users might cancel this request, causing the current function to be cancelled before
-        we validate the deployment.
-        """
-        background_task = asyncio.create_task(self._validate_deployment(model))
-        asyncio.shield(background_task)
 
         if await asyncio.shield(self._validate_deployment(model)):
             return model

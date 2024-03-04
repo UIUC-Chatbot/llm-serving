@@ -108,10 +108,14 @@ class ModelContext:
                     continue
 
             elif app_status == "DEPLOY_FAILED":
-                self.error_msg = (
-                    apps[self.app_name].deployments[self.wrapper_name].message
-                )
-                return ModelStatus.DEPLOY_FAILED
+                try:
+                    self.error_msg = (
+                        apps[self.app_name].deployments[self.wrapper_name].message
+                    )
+                    return ModelStatus.DEPLOY_FAILED
+                except:
+                    self.error_msg = "Unknown error."
+                    return ModelStatus.DEPLOY_FAILED
 
             elif app_status == "UNHEALTHY":
                 return ModelStatus.UNHEALTHY

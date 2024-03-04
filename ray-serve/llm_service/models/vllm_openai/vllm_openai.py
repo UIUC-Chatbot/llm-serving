@@ -5,8 +5,6 @@ import os
 import importlib
 import inspect
 
-from aioprometheus import MetricsMiddleware
-from aioprometheus.asgi.starlette import metrics
 import fastapi
 from http import HTTPStatus
 from fastapi import Request
@@ -14,9 +12,9 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse, Response
 
+import vllm
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
-from vllm.engine.metrics import add_global_metrics_labels
 from vllm.entrypoints.openai.protocol import (
     CompletionRequest,
     ChatCompletionRequest,
@@ -25,6 +23,7 @@ from vllm.entrypoints.openai.protocol import (
 from vllm.logger import init_logger
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
+from vllm.entrypoints.openai.serving_engine import LoRA
 
 from model_app import ModelAppInterface, ModelAppArgs
 from ray import serve
@@ -32,12 +31,29 @@ import time
 from typing import AsyncGenerator
 
 
-def parse_args(model_name: str, gpus_per_replica: int):
+class LoRAParserAction(argparse.Action):
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        lora_list = []
+        for item in values:
+            name, path = item.split("=")
+            lora_list.append(LoRA(name, path))
+        setattr(namespace, self.dest, lora_list)
+
+
+def parse_args(model_name, gpus_per_replica):
     parser = argparse.ArgumentParser(
         description="vLLM OpenAI-Compatible RESTful API server."
     )
     parser.add_argument("--host", type=str, default=None, help="host name")
     parser.add_argument("--port", type=int, default=8000, help="port number")
+    parser.add_argument(
+        "--uvicorn-log-level",
+        type=str,
+        default="info",
+        choices=["debug", "info", "warning", "error", "critical", "trace"],
+        help="log level for uvicorn",
+    )
     parser.add_argument(
         "--allow-credentials", action="store_true", help="allow credentials"
     )
@@ -63,6 +79,14 @@ def parse_args(model_name: str, gpus_per_replica: int):
         help="The model name used in the API. If not "
         "specified, the model name will be the same as "
         "the huggingface name.",
+    )
+    parser.add_argument(
+        "--lora-modules",
+        type=str,
+        default=None,
+        nargs="+",
+        action=LoRAParserAction,
+        help="LoRA module configurations in the format name=path. Multiple modules can be specified.",
     )
     parser.add_argument(
         "--chat-template",
@@ -126,15 +150,13 @@ def parse_args(model_name: str, gpus_per_replica: int):
 
 
 app = fastapi.FastAPI()
-app.add_middleware(MetricsMiddleware)  # Trace HTTP server metrics
-app.add_route("/metrics", metrics)  # Exposes HTTP metrics
 
 
 class _FakeRequest:
     """
     VLLM OpenAI server uses starlette raw request object, which is not serializable. We need to
     create a fake request object, which is serializable, to pass to the model.
-    As of vllm 0.3.0, they only uses is_disconnected() function.
+    As of vllm 0.3.3, they only uses is_disconnected() function.
     """
 
     async def is_disconnected(self):
@@ -181,9 +203,9 @@ class ModelApp(ModelAppInterface):
                     f"Invalid middleware {middleware}. Must be a function or a class."
                 )
 
+        self.logger.info(f"vLLM API server version {vllm.__version__}")
         self.logger.info(f"args: {self.args}")
 
-        global served_model
         if self.args.served_model_name is not None:
             self.served_model = self.args.served_model_name
         else:
@@ -207,14 +229,13 @@ class ModelApp(ModelAppInterface):
                 engine,
                 self.served_model,
                 self.args.response_role,
+                self.args.lora_modules,
                 self.args.chat_template,
             )
             self.openai_serving_completion = OpenAIServingCompletion(
-                engine, self.served_model
+                engine, self.served_model, self.args.lora_modules
             )
 
-            # Register labels for metrics
-            add_global_metrics_labels(model_name=engine_args.model)
             app.root_path = self.args.root_path
 
     def collect_eviction_defense_metrics(self) -> dict:
