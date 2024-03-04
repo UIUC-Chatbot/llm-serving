@@ -29,7 +29,7 @@ applications:
   import_path: model_daemon:app_builder
   args:
     controller: llm-serving
-    clean_period: 600
+    clean_period: 1200
     dump_period: 600
     gpu_check_period: 10
     health_check_period: 65
