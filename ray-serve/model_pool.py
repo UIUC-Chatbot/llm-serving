@@ -97,7 +97,6 @@ class ModelController:
         else:
             self._model_reference: dict = {}
         self._num_gpus: int = int(ray.cluster_resources().get("GPU", 0))
-        self._logger.info(f"ModelController initialized with {self._num_gpus} GPUs.")
         self._num_served_models: int = 0
 
         """
@@ -115,6 +114,11 @@ class ModelController:
         (assuming the provided config file only has the default configs and no model apps configs)
         """
         self._config_writer.apply_config()
+        if self._has_autoscaler:
+            self._logger.info("LLM Service is running with autoscaler enabled.")
+        else:
+            self._logger.info("LLM Service is running without autoscaler.")
+        self._logger.info(f"ModelController initialized with {self._num_gpus} GPUs.")
         self._logger.info("LLM Service initialized.")
 
     def load_model_reference(self, model_reference_path: str) -> None:
