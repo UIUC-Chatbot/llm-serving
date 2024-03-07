@@ -521,91 +521,90 @@ class ModelController:
         if request.key != "IloveRocknRoll":
             return "Permission denied. Aborting."
 
-        match request.mode:
-            case "get":
-                if request.model_type == "vllm_raw":
-                    model_type = ModelType.VLLM_RAW
-                elif request.model_type == "vllm_openai":
-                    model_type = ModelType.VLLM_OPENAI
+        if request.mode == "get":
+            if request.model_type == "empty":
+                model_type = ModelType.EMPTY
+            elif request.model_type == "vllm_raw":
+                model_type = ModelType.VLLM_RAW
+            elif request.model_type == "vllm_openai":
+                model_type = ModelType.VLLM_OPENAI
+            else:
+                return "Invalid model type. Aborting."
+
+            if request.model_name in self._model_reference:
+                priority: int = self._model_reference[request.model_name]["priority"]
+                gpus_per_replica: int = self._model_reference[request.model_name][
+                    "gpus_per_replica"
+                ]
+            else:
+                priority: int = 0
+                gpus_per_replica: int = request.gpus_per_replica
+
+            model = await self.get_or_register_model(
+                model_name=request.model_name,
+                model_type=model_type,
+                priority=priority,
+                gpus_per_replica=gpus_per_replica,
+                force_load=request.force_load,
+            )
+            if model is not None:
+                return f"Model {model.model_name} endpoint: {model.route_prefix}"
+            else:
+                if request.model_name in self._model_unsupported:
+                    return f"Model {request.model_name} not supported: {self._model_unsupported[request.model_name]}"
                 else:
-                    return "Invalid model type. Aborting."
-                if request.model_name in self._model_reference:
-                    priority: int = self._model_reference[request.model_name][
-                        "priority"
-                    ]
-                    gpus_per_replica: int = self._model_reference[request.model_name][
-                        "gpus_per_replica"
-                    ]
-                else:
-                    priority: int = 0
-                    gpus_per_replica = 1
-                model = await self.get_or_register_model(
-                    model_name=request.model_name,
-                    model_type=model_type,
-                    priority=priority,
-                    gpus_per_replica=gpus_per_replica,
-                    force_load=request.force_load,
+                    return f"Model {request.model_name} initialization failed."
+
+        elif "delete":
+            if await self.delete_model_by_model_name(request.model_name):
+                return f"Model {request.model_name} deleted."
+            else:
+                return f"Model {request.model_name} not found."
+
+        elif "list":
+            dump_model_pool = []
+            for model in self._model_pool.values():
+                dump_model_pool.append(
+                    {
+                        "model_name": model.model_name,
+                        "model_type": model.model_type,
+                        "priority": model.priority,
+                        "route_prefix": model.route_prefix,
+                        "gpus_per_replica": model.gpus_per_replica,
+                        "num_active_replicas": model.num_active_replicas,
+                    }
                 )
-                if model is not None:
-                    return f"Model {model.model_name} endpoint: {model.route_prefix}"
-                else:
-                    if request.model_name in self._model_unsupported:
-                        return f"Model {request.model_name} not supported: {self._model_unsupported[request.model_name]}"
-                    else:
-                        return f"Model {request.model_name} initialization failed."
+            dump_model_unsupported = []
+            for model_name, error_message in self._model_unsupported.items():
+                dump_model_unsupported.append(
+                    {"model_name": model_name, "error_message": error_message}
+                )
+            return {
+                "model_pool": dump_model_pool,
+                "model_unsupported": dump_model_unsupported,
+            }
 
-            case "delete":
-                if await self.delete_model_by_model_name(request.model_name):
-                    return f"Model {request.model_name} deleted."
-                else:
-                    return f"Model {request.model_name} not found."
+        elif "dump_config":
+            return self.get_current_config()
 
-            case "list":
-                dump_model_pool = []
-                for model in self._model_pool.values():
-                    dump_model_pool.append(
-                        {
-                            "model_name": model.model_name,
-                            "model_type": model.model_type,
-                            "priority": model.priority,
-                            "route_prefix": model.route_prefix,
-                            "gpus_per_replica": model.gpus_per_replica,
-                            "num_active_replicas": model.num_active_replicas,
-                        }
-                    )
+        elif "info":
+            return {
+                "has_autoscaler": self._has_autoscaler,
+                "num_total_gpus": self._num_gpus,
+                "num_available_gpus:": self._count_available_gpus(),
+                "num_served_models": self._num_served_models,
+            }
 
-                dump_model_unsupported = []
-                for model_name, error_message in self._model_unsupported.items():
-                    dump_model_unsupported.append(
-                        {"model_name": model_name, "error_message": error_message}
-                    )
+        elif "reset_unsupported":
+            await self.reset_unsupported()
+            return "Unsupported models reset."
 
-                return {
-                    "model_pool": dump_model_pool,
-                    "model_unsupported": dump_model_unsupported,
-                }
+        elif "reset_all":
+            await self.reset_all()
+            return "LLM service reset."
 
-            case "dump_config":
-                return self.get_current_config()
-
-            case "info":
-                return {
-                    "has_autoscaler": self._has_autoscaler,
-                    "num_total_gpus": self._num_gpus,
-                    "num_available_gpus:": self._count_available_gpus(),
-                    "num_served_models": self._num_served_models,
-                }
-
-            case "reset_unsupported":
-                await self.reset_unsupported()
-                return "Unsupported models reset."
-
-            case "reset_all":
-                await self.reset_all()
-                return "LLM service reset."
-
-            case _:
-                return "Invalid mode. Aborting."
+        else:
+            return "Invalid mode. Aborting."
 
     @main_app.get("/hot-models")
     def get_hot_models(self) -> dict:

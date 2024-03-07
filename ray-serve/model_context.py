@@ -14,6 +14,7 @@ class ModelStatus(Enum):
 
 
 class ModelType(Enum):
+    EMPTY = 0  # Empty model, for testing purposes
     VLLM_RAW = 1  # Raw VLLM model, created by llm = LLM(model="model_name")
     VLLM_OPENAI = 2  # VLLM OpenAI-Compatible server
 
@@ -24,7 +25,10 @@ class ModelPath:
         """
         Return a path to the model implementation file.
         """
-        if model_type == ModelType.VLLM_RAW:
+        if model_type == ModelType.EMPTY:
+            return "models.empty:app_builder"
+
+        elif model_type == ModelType.VLLM_RAW:
             return "models.vllm_raw:app_builder"
 
         elif model_type == ModelType.VLLM_OPENAI:

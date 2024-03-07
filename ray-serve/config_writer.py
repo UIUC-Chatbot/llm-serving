@@ -84,7 +84,7 @@ class ConfigWriter:
                         "placement_group_bundles": [
                             {"CPU": 1, "GPU": 1} for _ in range(model.gpus_per_replica)
                         ],
-                        "placement_group_strategy": "PACK",
+                        "placement_group_strategy": "STRICT_PACK",
                         "user_config": {"is_active": is_active},
                     },
                 ]
@@ -95,7 +95,7 @@ class ConfigWriter:
                         "num_replicas": 1,
                         "ray_actor_options": {"num_cpus": 1},
                         "placement_group_bundles": [{"CPU": 1}],
-                        "placement_group_strategy": "PACK",
+                        "placement_group_strategy": "STRICT_PACK",
                         "user_config": {"is_active": is_active},
                     },
                 ]
