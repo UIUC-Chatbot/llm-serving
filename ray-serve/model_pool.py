@@ -555,13 +555,13 @@ class ModelController:
                 else:
                     return f"Model {request.model_name} initialization failed."
 
-        elif "delete":
+        elif request.mode == "delete":
             if await self.delete_model_by_model_name(request.model_name):
                 return f"Model {request.model_name} deleted."
             else:
                 return f"Model {request.model_name} not found."
 
-        elif "list":
+        elif request.mode == "list":
             dump_model_pool = []
             for model in self._model_pool.values():
                 dump_model_pool.append(
@@ -584,10 +584,10 @@ class ModelController:
                 "model_unsupported": dump_model_unsupported,
             }
 
-        elif "dump_config":
+        elif request.mode == "dump_config":
             return self.get_current_config()
 
-        elif "info":
+        elif request.mode == "info":
             return {
                 "has_autoscaler": self._has_autoscaler,
                 "num_total_gpus": self._num_gpus,
@@ -595,11 +595,11 @@ class ModelController:
                 "num_served_models": self._num_served_models,
             }
 
-        elif "reset_unsupported":
+        elif request.mode == "reset_unsupported":
             await self.reset_unsupported()
             return "Unsupported models reset."
 
-        elif "reset_all":
+        elif request.mode == "reset_all":
             await self.reset_all()
             return "LLM service reset."
 

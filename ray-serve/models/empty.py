@@ -1,4 +1,5 @@
 import fastapi
+from logging import getLogger, Logger
 from model_app import ModelAppInterface, ModelAppArgs
 from ray import serve
 from ray.serve import Application
@@ -17,6 +18,7 @@ class ModelApp(ModelAppInterface):
 
     def __init__(self, model_name: str, controller: str, gpus_per_replica: int) -> None:
         self._controller_app: DeploymentHandle = serve.get_app_handle(controller)
+        self._logger: Logger = getLogger("ray.serve")
         self._is_active: bool = False
         self._model_name: str = model_name
 

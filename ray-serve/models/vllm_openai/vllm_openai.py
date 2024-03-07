@@ -144,6 +144,8 @@ def parse_args(model_name, gpus_per_replica):
             "--trust-remote-code",
             "--tensor-parallel-size",
             f"{gpus_per_replica}",
+            "--device",
+            "cuda",
             "--enforce-eager",
         ]
     )

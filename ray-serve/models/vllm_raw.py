@@ -66,6 +66,7 @@ class ModelApp(ModelAppInterface):
                 model=self._model_name,
                 tensor_parallel_size=self._gpus_per_replica,
                 trust_remote_code=True,
+                device="cuda",
             )
         else:
             self._model = None
