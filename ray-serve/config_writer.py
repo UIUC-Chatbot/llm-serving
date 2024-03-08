@@ -4,7 +4,7 @@ from ray.dashboard.modules.serve.sdk import ServeSubmissionClient
 from ray.serve.schema import ServeDeploySchema
 import yaml
 
-from model_context import ModelContext, ModelPath
+from model_context import ModelContext, ModelPath, ModelType
 
 
 class ConfigWriter:
@@ -50,30 +50,82 @@ class ConfigWriter:
             self._apps = self._config["applications"]
             self._logger.info("Config file deduplicated (if there was duplication).")
 
-    def add_app(self, model: ModelContext, is_active: bool) -> None:
-        # import_path is the path to the model implementation file.
-        import_path: str = ModelPath.get_import_path(model.model_type)
-
-        """
-        VLLM supports distributed inference via Ray, i.e., using multiple GPUs for a single model.
-        VLLM utilizes Ray placement group for this feature.
-        For models that don't use distributed inference, we must specify num_gpus == 1.
-        For models that use distributed inference, we must not specify num_gpus, and use placement
-        group to specify the number of GPUs. We use strick_pack strategy to force all bundles to be
-        on the same node. GPU communications across multiple nodes seems not well supported.
-        """
-        if model.gpus_per_replica == 1:
+    def _configure_empty_model(
+        self, model: ModelContext, is_active: bool
+    ) -> list[dict]:
+        if is_active:
             deployments = [
                 {
                     "name": model.wrapper_name,
                     "num_replicas": 1,
                     "ray_actor_options": {
                         "num_cpus": 1,
-                        "num_gpus": model.num_active_replicas,
+                        "num_gpus": 1,
                     },
                     "user_config": {"is_active": is_active},
                 },
             ]
+        else:
+            deployments = [
+                {
+                    "name": model.wrapper_name,
+                    "num_replicas": 1,
+                    "ray_actor_options": {
+                        "num_cpus": 1,
+                        "num_gpus": 0,
+                    },
+                    "user_config": {"is_active": is_active},
+                },
+            ]
+        return deployments
+
+    def _configure_vllm(self, model: ModelContext, is_active: bool) -> list[dict]:
+        """
+        VLLM supports distributed inference via Ray, i.e., using multiple GPUs for a single model.
+        VLLM utilizes Ray placement group for this feature.
+
+        For models that don't use distributed inference, we must specify num_gpus == 1 so that the
+        model gets a single GPU.
+
+        For models that use distributed inference, we must not specify num_gpus, and instead use
+        placement group to allocate the number of GPUs the model requires. Please refer to Ray
+        documentation for more details about placement group.
+        Simply put, we can specify some bundles of resources in a placement group, and the serve
+        deployment will be allocated to the first bundle. Thus, the resources required by the
+        deployment itself as specified in ray_actor_options must be available in the first bundle.
+        The children Ray actors created by the deployment will be allocated to the placement group
+        as well.
+
+        If cross-node GPU communication is not supported, we use STRICT_PACK strategy to force all
+        bundles to be on the same node. If we do have cross-node GPU communication, we can use PACK
+        strategy to allow the bundles to be allocated to different nodes.
+        """
+        if model.gpus_per_replica == 1:  # Single GPU
+            if is_active:
+                deployments = [
+                    {
+                        "name": model.wrapper_name,
+                        "num_replicas": 1,
+                        "ray_actor_options": {
+                            "num_cpus": 1,
+                            "num_gpus": 1,
+                        },
+                        "user_config": {"is_active": is_active},
+                    },
+                ]
+            else:
+                deployments = [
+                    {
+                        "name": model.wrapper_name,
+                        "num_replicas": 1,
+                        "ray_actor_options": {
+                            "num_cpus": 1,
+                            "num_gpus": 0,
+                        },
+                        "user_config": {"is_active": is_active},
+                    },
+                ]
+
         else:  # Distributed inference
             if is_active:
                 deployments = [
@@ -99,6 +151,28 @@ class ConfigWriter:
                         "user_config": {"is_active": is_active},
                     },
                 ]
+        return deployments
+
+    def add_app(self, model: ModelContext, is_active: bool) -> None:
+        # import_path is the path to the model implementation file.
+        import_path: str = ModelPath.get_import_path(model.model_type)
+
+        # Each model type has their own builder function. Even though this might seem redundant, it
+        # makes the code less coupled and more readable.
+        deployments: list[dict]
+        if model.model_type == ModelType.EMPTY:
+            deployments = self._configure_empty_model(model, is_active)
+
+        elif model.model_type == ModelType.VLLM_RAW:
+            deployments = self._configure_vllm(model, is_active)
+
+        elif model.model_type == ModelType.VLLM_OPENAI:
+            deployments = self._configure_vllm(model, is_active)
+
+        else:
+            raise ValueError(
+                f"Model type {model.model_type} doesn't have a builder function."
+            )
 
         # Add the new app to the config file
         self._apps.append(
