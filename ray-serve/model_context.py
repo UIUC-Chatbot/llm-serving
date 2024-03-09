@@ -105,7 +105,7 @@ class ModelContext:
                         exhaustion_count += 1
                     else:
                         exhaustion_count = 0
-                    if exhaustion_count > 50:
+                    if exhaustion_count > 90:
                         self.activation_failed = True
                         return ModelStatus.PENDING
                 except KeyError:

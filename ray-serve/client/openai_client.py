@@ -8,9 +8,10 @@ parser.add_argument("-e", "--endpoint", default="http://127.0.0.1:8000/llm")
 parser.add_argument("--model-name", default="meta-llama/Llama-2-7b-chat-hf")
 parser.add_argument("-s", "--stream", action="store_true")
 parser.add_argument("-l", "--loop", action="store_true")
+parser.add_argument("-k", "--key", required=True)
 args = parser.parse_args()
 
-openai_api_key = "EMPTY"
+openai_api_key = args.key
 client = OpenAI(api_key=openai_api_key, base_url=f"{args.endpoint}/v1/")
 
 prompts = [

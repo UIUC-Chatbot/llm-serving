@@ -3,7 +3,6 @@ from model_app import ModelAppInterface, ModelAppArgs
 from pydantic import BaseModel
 from ray import serve
 from ray.serve import Application
-from ray.serve.exceptions import RayServeException
 from ray.serve.handle import DeploymentHandle
 import time
 from typing import Any

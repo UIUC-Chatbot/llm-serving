@@ -60,7 +60,7 @@ class ConfigWriter:
                     "num_replicas": 1,
                     "ray_actor_options": {
                         "num_cpus": 1,
-                        "num_gpus": 1,
+                        "num_gpus": model.gpus_per_replica,
                     },
                     "user_config": {"is_active": is_active},
                 },
@@ -79,7 +79,9 @@ class ConfigWriter:
             ]
         return deployments
 
-    def _configure_vllm(self, model: ModelContext, is_active: bool) -> list[dict]:
+    def _configure_vllm(
+        self, model: ModelContext, is_active: bool, hf_key: str | None = None
+    ) -> list[dict]:
         """
         VLLM supports distributed inference via Ray, i.e., using multiple GPUs for a single model.
         VLLM utilizes Ray placement group for this feature.
@@ -102,58 +104,56 @@ class ConfigWriter:
         """
         if model.gpus_per_replica == 1:  # Single GPU
             if is_active:
-                deployments = [
-                    {
-                        "name": model.wrapper_name,
-                        "num_replicas": 1,
-                        "ray_actor_options": {
-                            "num_cpus": 1,
-                            "num_gpus": 1,
-                        },
-                        "user_config": {"is_active": is_active},
-                    },
-                ]
+                num_gpus = 1
             else:
-                deployments = [
-                    {
-                        "name": model.wrapper_name,
-                        "num_replicas": 1,
-                        "ray_actor_options": {
-                            "num_cpus": 1,
-                            "num_gpus": 0,
-                        },
-                        "user_config": {"is_active": is_active},
-                    },
-                ]
+                num_gpus = 0
+            if hf_key is not None:
+                ray_actor_options = {
+                    "num_cpus": 1,
+                    "num_gpus": num_gpus,
+                    "runtime_env": {"env_vars": {"HF_TOKEN": hf_key}},
+                }
+            else:
+                ray_actor_options = {"num_cpus": 1, "num_gpus": num_gpus}
+            deployments = [
+                {
+                    "name": model.wrapper_name,
+                    "num_replicas": 1,
+                    "ray_actor_options": ray_actor_options,
+                    "user_config": {"is_active": is_active},
+                },
+            ]
 
         else:  # Distributed inference
+            placement_group_strategy = "STRICT_PACK"
             if is_active:
-                deployments = [
-                    {
-                        "name": model.wrapper_name,
-                        "num_replicas": 1,
-                        "ray_actor_options": {"num_cpus": 1},
-                        "placement_group_bundles": [
-                            {"CPU": 1, "GPU": 1} for _ in range(model.gpus_per_replica)
-                        ],
-                        "placement_group_strategy": "STRICT_PACK",
-                        "user_config": {"is_active": is_active},
-                    },
+                placement_group_bundles = [
+                    {"CPU": 1, "GPU": 1} for _ in range(model.gpus_per_replica)
                 ]
             else:
-                deployments = [
-                    {
-                        "name": model.wrapper_name,
-                        "num_replicas": 1,
-                        "ray_actor_options": {"num_cpus": 1},
-                        "placement_group_bundles": [{"CPU": 1}],
-                        "placement_group_strategy": "STRICT_PACK",
-                        "user_config": {"is_active": is_active},
-                    },
-                ]
+                placement_group_bundles = [{"CPU": 1}]
+            if hf_key is not None:
+                ray_actor_options = {
+                    "num_cpus": 1,
+                    "runtime_env": {"env_vars": {"HF_TOKEN": hf_key}},
+                }
+            else:
+                ray_actor_options = {"num_cpus": 1}
+            deployments = [
+                {
+                    "name": model.wrapper_name,
+                    "num_replicas": 1,
+                    "ray_actor_options": ray_actor_options,
+                    "placement_group_bundles": placement_group_bundles,
+                    "placement_group_strategy": placement_group_strategy,
+                    "user_config": {"is_active": is_active},
+                },
+            ]
         return deployments
 
-    def add_app(self, model: ModelContext, is_active: bool) -> None:
+    def add_app(
+        self, model: ModelContext, is_active: bool, hf_key: str | None = None
+    ) -> None:
         # import_path is the path to the model implementation file.
         import_path: str = ModelPath.get_import_path(model.model_type)
 
@@ -164,10 +164,10 @@ class ConfigWriter:
             deployments = self._configure_empty_model(model, is_active)
 
         elif model.model_type == ModelType.VLLM_RAW:
-            deployments = self._configure_vllm(model, is_active)
+            deployments = self._configure_vllm(model, is_active, hf_key)
 
         elif model.model_type == ModelType.VLLM_OPENAI:
-            deployments = self._configure_vllm(model, is_active)
+            deployments = self._configure_vllm(model, is_active, hf_key)
 
         else:
             raise ValueError(
@@ -212,10 +212,23 @@ class ConfigWriter:
         self.apply_config()
         self._logger.info(f"Apps: {names_model_to_evict} removed.")
 
-    def activate_app(self, model: ModelContext) -> None:
-        for app in self._apps:
-            if app.get("name") != model.app_name:
-                continue
+    def _toggle_empty_model(
+        self, model: ModelContext, app: dict, should_be_active: bool
+    ) -> None:
+        if should_be_active:
+            app["deployments"][0]["user_config"]["is_active"] = True
+            app["deployments"][0]["ray_actor_options"][
+                "num_gpus"
+            ] = model.gpus_per_replica
+
+        else:
+            app["deployments"][0]["user_config"]["is_active"] = False
+            app["deployments"][0]["ray_actor_options"]["num_gpus"] = 0
+
+    def _toggle_vllm(
+        self, model: ModelContext, app: dict, should_be_active: bool
+    ) -> None:
+        if should_be_active:
             app["deployments"][0]["user_config"]["is_active"] = True
             if model.gpus_per_replica == 1:
                 app["deployments"][0]["ray_actor_options"]["num_gpus"] = 1
@@ -223,24 +236,62 @@ class ConfigWriter:
                 app["deployments"][0]["placement_group_bundles"] = [
                     {"CPU": 1, "GPU": 1} for _ in range(model.gpus_per_replica)
                 ]
-            break
+        else:
+            app["deployments"][0]["user_config"]["is_active"] = False
+            if model.gpus_per_replica == 1:
+                app["deployments"][0]["ray_actor_options"]["num_gpus"] = 0
+            else:
+                app["deployments"][0]["placement_group_bundles"] = [{"CPU": 1}]
+
+    def activate_app(self, model: ModelContext) -> None:
+        # Each model type has their own toggle function. Even though this might seem redundant, it
+        # makes the code less coupled and more readable.
+        for app in self._apps:
+            if app.get("name") != model.app_name:
+                continue
+            if model.model_type == ModelType.EMPTY:
+                self._toggle_empty_model(model, app, True)
+                break
+            elif model.model_type == ModelType.VLLM_RAW:
+                self._toggle_vllm(model, app, True)
+                break
+            elif model.model_type == ModelType.VLLM_OPENAI:
+                self._toggle_vllm(model, app, True)
+                break
+            else:
+                raise ValueError(
+                    f"Model type {model.model_type} doesn't have a toggle function."
+                )
 
         self.apply_config()
         self._logger.info(f"App: {model.app_name} activated.")
 
     def deactivate_apps(self, models: list[ModelContext]) -> None:
-        names_model_to_deactivate = [model.app_name for model in models]
+        # Each model type has their own toggle function. Even though this might seem redundant, it
+        # makes the code less coupled and more readable.
+        models_dict = {model.app_name: model for model in models}
         for app in self._apps:
-            if app.get("name") not in names_model_to_deactivate:
+            app_name = app.get("name", None)
+            if app.get("name") not in models_dict:
                 continue
-            app["deployments"][0]["user_config"]["is_active"] = False
-            if app["args"]["gpus_per_replica"] == 1:
-                app["deployments"][0]["ray_actor_options"]["num_gpus"] = 0
+            model = models_dict[app_name]
+
+            if model.model_type == ModelType.EMPTY:
+                self._toggle_empty_model(model, app, False)
+                break
+            elif model.model_type == ModelType.VLLM_RAW:
+                self._toggle_vllm(model, app, False)
+                break
+            elif model.model_type == ModelType.VLLM_OPENAI:
+                self._toggle_vllm(model, app, False)
+                break
             else:
-                app["deployments"][0]["placement_group_bundles"] = [{"CPU": 1}]
+                raise ValueError(
+                    f"Model type {model.model_type} doesn't have a toggle function."
+                )
 
         self.apply_config()
-        self._logger.info(f"Apps: {names_model_to_deactivate} deactivated.")
+        self._logger.info(f"Apps: {models_dict.keys()} deactivated.")
 
     def get_current_config(self) -> dict:
         return self._config

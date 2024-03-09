@@ -1,6 +1,6 @@
 import asyncio
 import datetime
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse, Response
 import json
 from logging import getLogger, Logger
@@ -247,6 +247,7 @@ class ModelController:
         model_type: ModelType,
         priority: int,
         gpus_per_replica: int = 1,
+        hf_key: str | None = None,
         force_load: bool = False,
     ) -> ModelContext | None:
         """
@@ -290,10 +291,14 @@ class ModelController:
                     or self._has_autoscaler
                 ):
                     model.num_active_replicas = 1
-                    self._config_writer.add_app(model=model, is_active=True)
+                    self._config_writer.add_app(
+                        model=model, is_active=True, hf_key=hf_key
+                    )
                 else:
                     model.num_active_replicas = 0
-                    self._config_writer.add_app(model=model, is_active=False)
+                    self._config_writer.add_app(
+                        model=model, is_active=False, hf_key=hf_key
+                    )
                 self._model_pool[model_name] = model
 
         if await asyncio.shield(self._validate_deployment(model)):
@@ -499,7 +504,7 @@ class ModelController:
             now = time.time()
             for candidate in available_candidates:
                 # The model has not been used for a long time
-                if now - candidate[1] > 300:
+                if now - candidate[1] > 600:
                     unpopular_models.append(candidate[0])
 
         for model in unpopular_models:
@@ -656,7 +661,9 @@ class ModelController:
         return {"object": "list", "data": models}
 
     @main_app.post("/v1/chat/completions")
-    async def create_chat_completion(self, request: ChatCompletionRequest):
+    async def create_chat_completion(
+        self, request: ChatCompletionRequest, raw_request: Request
+    ):
         async def retry_func(func, num_retries):
             retry_count = 0
             while retry_count < num_retries:
@@ -713,11 +720,22 @@ class ModelController:
             else:
                 priority: int = 0
                 gpus_per_replica = 1
+            # Huggingface key authorization
+            hf_key = None
+            auth_header = raw_request.headers.get("Authorization")
+            if auth_header and auth_header.startswith("Bearer "):
+                token = auth_header.split(" ")[1]
+                if token.startswith("hf_"):
+                    hf_key = token
+                else:
+                    self._logger.info("Received invalid huggingface key.")
+
             model = await self.get_or_register_model(
                 model_name=request.model,
                 model_type=ModelType.VLLM_OPENAI,
                 priority=priority,
                 gpus_per_replica=gpus_per_replica,
+                hf_key=hf_key,
             )
             if model is None:
                 if request.model in self._model_unsupported:
@@ -725,7 +743,9 @@ class ModelController:
                         content=self._model_unsupported[request.model], status_code=400
                     )
                 else:
-                    return JSONResponse(content="Model Not Available", status_code=400)
+                    return JSONResponse(
+                        content="Model is not supported.", status_code=400
+                    )
 
             if request.stream:
                 return await create_stream_request(model)
