@@ -533,6 +533,8 @@ class ModelController:
                 model_type = ModelType.VLLM_RAW
             elif request.model_type == "vllm_openai":
                 model_type = ModelType.VLLM_OPENAI
+            elif request.model_type == "embedding":
+                model_type = ModelType.EMBEDDING
             else:
                 return "Invalid model type. Aborting."
 

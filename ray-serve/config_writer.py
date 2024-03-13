@@ -151,6 +151,38 @@ class ConfigWriter:
             ]
         return deployments
 
+    def _configure_embedding(
+        self, model: ModelContext, is_active: bool, hf_key: str | None = None
+    ) -> list[dict]:
+        if model.gpus_per_replica != 1:
+            raise ValueError(
+                f"Embedding model {model.app_name} can only use 1 GPU per replica."
+            )
+
+        if is_active:
+            num_gpus = 1
+        else:
+            num_gpus = 0
+        if hf_key is not None:
+            ray_actor_options = {
+                "num_cpus": 1,
+                "num_gpus": num_gpus,
+                "runtime_env": {"env_vars": {"HF_TOKEN": hf_key}},
+            }
+        else:
+            ray_actor_options = {"num_cpus": 1, "num_gpus": num_gpus}
+
+        deployments = [
+            {
+                "name": model.wrapper_name,
+                "num_replicas": 1,
+                "ray_actor_options": ray_actor_options,
+                "user_config": {"is_active": is_active},
+            },
+        ]
+
+        return deployments
+
     def add_app(
         self, model: ModelContext, is_active: bool, hf_key: str | None = None
     ) -> None:
@@ -168,6 +200,9 @@ class ConfigWriter:
 
         elif model.model_type == ModelType.VLLM_OPENAI:
             deployments = self._configure_vllm(model, is_active, hf_key)
+
+        elif model.model_type == ModelType.EMBEDDING:
+            deployments = self._configure_embedding(model, is_active, hf_key)
 
         else:
             raise ValueError(
@@ -243,25 +278,43 @@ class ConfigWriter:
             else:
                 app["deployments"][0]["placement_group_bundles"] = [{"CPU": 1}]
 
+    def _toggle_embedding(
+        self, model: ModelContext, app: dict, should_be_active: bool
+    ) -> None:
+        if should_be_active:
+            app["deployments"][0]["user_config"]["is_active"] = True
+            app["deployments"][0]["ray_actor_options"][
+                "num_gpus"
+            ] = model.gpus_per_replica
+
+        else:
+            app["deployments"][0]["user_config"]["is_active"] = False
+            app["deployments"][0]["ray_actor_options"]["num_gpus"] = 0
+
     def activate_app(self, model: ModelContext) -> None:
         # Each model type has their own toggle function. Even though this might seem redundant, it
         # makes the code less coupled and more readable.
         for app in self._apps:
             if app.get("name") != model.app_name:
                 continue
+
             if model.model_type == ModelType.EMPTY:
                 self._toggle_empty_model(model, app, True)
-                break
+
             elif model.model_type == ModelType.VLLM_RAW:
                 self._toggle_vllm(model, app, True)
-                break
+
             elif model.model_type == ModelType.VLLM_OPENAI:
                 self._toggle_vllm(model, app, True)
-                break
+
+            elif model.model_type == ModelType.EMBEDDING:
+                self._toggle_embedding(model, app, True)
+
             else:
                 raise ValueError(
                     f"Model type {model.model_type} doesn't have a toggle function."
                 )
+            break
 
         self.apply_config()
         self._logger.info(f"App: {model.app_name} activated.")
@@ -278,13 +331,16 @@ class ConfigWriter:
 
             if model.model_type == ModelType.EMPTY:
                 self._toggle_empty_model(model, app, False)
-                break
+
             elif model.model_type == ModelType.VLLM_RAW:
                 self._toggle_vllm(model, app, False)
-                break
+
             elif model.model_type == ModelType.VLLM_OPENAI:
                 self._toggle_vllm(model, app, False)
-                break
+
+            elif model.model_type == ModelType.EMBEDDING:
+                self._toggle_embedding(model, app, False)
+
             else:
                 raise ValueError(
                     f"Model type {model.model_type} doesn't have a toggle function."

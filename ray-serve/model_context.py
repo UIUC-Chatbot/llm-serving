@@ -17,6 +17,7 @@ class ModelType(Enum):
     EMPTY = 0  # Empty model, for testing purposes
     VLLM_RAW = 1  # Raw VLLM model, created by llm = LLM(model="model_name")
     VLLM_OPENAI = 2  # VLLM OpenAI-Compatible server
+    EMBEDDING = 3  # Embedding model
 
 
 class ModelPath:
@@ -33,6 +34,9 @@ class ModelPath:
 
         elif model_type == ModelType.VLLM_OPENAI:
             return "models.vllm_openai.vllm_openai:app_builder"
+
+        elif model_type == ModelType.EMBEDDING:
+            return "models.embedding:app_builder"
 
         else:
             raise ValueError("Invalid model type.")
