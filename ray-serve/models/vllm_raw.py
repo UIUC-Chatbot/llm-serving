@@ -30,7 +30,7 @@ class ModelApp(ModelAppInterface):
         self._model: LLM | None = None
         self._model_name: str = model_name
         self._gpus_per_replica: int = gpus_per_replica
-        self._last_served_time = time.time()
+        self._last_served_time: float = time.time()
         self._sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 
     async def _check_model_availability(self) -> bool:

@@ -216,8 +216,8 @@ class ModelApp(ModelAppInterface):
         # LLM-serving related fields
         self._is_active: bool = False
         self._controller_app = serve.get_app_handle(controller)
-        self._last_served_time = time.time()
-        self._unhandled_requests = 0
+        self._last_served_time: float = time.time()
+        self._unhandled_requests: int = 0
 
     def reconfigure(self, config) -> None:
         """

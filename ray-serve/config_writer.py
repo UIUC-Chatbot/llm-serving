@@ -347,7 +347,7 @@ class ConfigWriter:
                 )
 
         self.apply_config()
-        self._logger.info(f"Apps: {models_dict.keys()} deactivated.")
+        self._logger.info(f"Apps: {list(models_dict.keys())} deactivated.")
 
     def get_current_config(self) -> dict:
         return self._config
