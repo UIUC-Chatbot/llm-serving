@@ -1,5 +1,6 @@
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, StreamingResponse, Response
+from fastapi.responses import Response
+import httpx
 from logging import getLogger, Logger
 from model_app import ModelAppInterface, ModelAppArgs
 import psutil
@@ -66,7 +67,7 @@ class ModelApp(ModelAppInterface):
                 "--nv",
                 "docker://ghcr.io/huggingface/text-embeddings-inference:1.1",
                 "--model-id",
-                "BAAI/bge-large-en-v1.5",
+                f"{self._model_name}",
                 "--hostname",
                 "0.0.0.0",
                 "-p",
@@ -85,12 +86,42 @@ class ModelApp(ModelAppInterface):
         else:
             self._logger.info(f"Embedding model {self._model_name} inactive")
 
-    @app.post("/")
-    def call(self, request: Request) -> Any:
+    @app.get("/{full_path:path}")
+    @app.post("/{full_path:path}")
+    async def user_request(self, full_path: str, request: Request) -> Response:
         self._last_served_time = time.time()
         if not self._check_model_availability():
-            return Response(status_code=503, content="Model not available")
-        return {"embedding": [0.1, 0.2, 0.3]}
+            return Response(status_code=503, content="Embedding Model not available")
+
+        # Forward the user request to the embedding model server
+        target_url = f"http://localhost:{self._port}/{full_path}"
+        method = request.method
+        headers = {
+            k: v
+            for k, v in request.headers.items()
+            if k.lower() not in ["host", "content-length", "content-type"]
+        }  # Extract headers from the original request.
+
+        async with httpx.AsyncClient() as client:
+            if method.upper() == "GET":
+                response = await client.request(method, target_url, headers=headers)
+
+            elif method.upper() == "POST":
+                body = await request.json()
+                response = await client.request(
+                    method, target_url, headers=headers, json=body
+                )
+
+            else:
+                return Response(
+                    status_code=405, content="Method not allowed", headers={}
+                )
+
+            return Response(
+                content=response.content,
+                status_code=response.status_code,
+                headers=dict(response.headers),
+            )
 
     def collect_eviction_defense_metrics(self) -> dict[str, Any]:
         return {"last_served_time": self._last_served_time}
