@@ -57,7 +57,7 @@ class ModelApp(ModelAppInterface):
         return False
 
     def reconfigure(self, config: dict[str, Any]) -> None:
-        self._is_active: bool = config["is_active"]
+        self._is_active = config["is_active"]
         if self._is_active:
             self._find_available_port()
             command = [
@@ -90,7 +90,7 @@ class ModelApp(ModelAppInterface):
     @app.post("/{full_path:path}")
     async def user_request(self, full_path: str, request: Request) -> Response:
         self._last_served_time = time.time()
-        if not self._check_model_availability():
+        if not await self._check_model_availability():
             return Response(status_code=503, content="Embedding Model not available")
 
         # Forward the user request to the embedding model server

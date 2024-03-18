@@ -89,6 +89,7 @@ class ModelController:
     ) -> None:
         self._config_writer: ConfigWriter = ConfigWriter(config_file_path)
         self._has_autoscaler: bool = has_autoscaler
+        self._last_exhaustion_time: float = 0
         self._logger: Logger = getLogger("ray.serve")
         self._model_pool: dict[str, ModelContext] = {}  # Currently registered models
         self._model_unsupported: dict[str, str] = {}  # Unsupported models
@@ -210,8 +211,9 @@ class ModelController:
                 # The model has been waiting for resources for a long time, deactivate it.
                 async with self._lock:
                     self._logger.warning(
-                        f"App {model.app_name} has been waiting for resources for a long time, deactivate it."
+                        f"App {model.app_name} has been pending due to resource exhaustion, deactivate it."
                     )
+                    self._last_exhaustion_time = time.time()
                     self._deactivate_models([model])
 
             elif model_status == ModelStatus.DEPLOY_FAILED:
@@ -407,6 +409,7 @@ class ModelController:
                 continue
             if model.num_active_replicas == 0:
                 continue
+            # TODO: ignore higher priority models
             candidates.append(self._gather_metrics(model))
 
         candidate_reports = await asyncio.gather(*candidates)
@@ -460,7 +463,11 @@ class ModelController:
 
             # At this point, there are no resources available for the model.
             # Let's try deploying it anyway and see if the auto-scaler can allocate more resources.
-            if self._has_autoscaler and not model.activation_failed:
+            if (
+                self._has_autoscaler
+                and not model.activation_failed
+                and time.time() - self._last_exhaustion_time > 300
+            ):
                 self._logger.info(
                     f"Trying to deploy model {model_name} even if there are no available GPUs."
                 )
@@ -507,6 +514,7 @@ class ModelController:
                 if now - candidate[1] > 600:
                     unpopular_models.append(candidate[0])
 
+        # Release the lock and deactivate the unpopular models
         for model in unpopular_models:
             self._logger.info(
                 f"Remove {model.model_name} because it has not been used for a long time."
