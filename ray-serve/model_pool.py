@@ -409,7 +409,8 @@ class ModelController:
                 continue
             if model.num_active_replicas == 0:
                 continue
-            # TODO: ignore higher priority models
+            if model.priority > initiator.priority:
+                continue
             candidates.append(self._gather_metrics(model))
 
         candidate_reports = await asyncio.gather(*candidates)
@@ -496,7 +497,7 @@ class ModelController:
 
         async with self._lock:
             for model in self._model_pool.values():
-                if model.priority > 0:
+                if model.priority > 2:
                     now = datetime.datetime.now().time()
                     morning = datetime.time(9, 0, 0)
                     night = datetime.time(23, 0, 0)
