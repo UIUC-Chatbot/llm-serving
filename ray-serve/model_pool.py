@@ -141,7 +141,7 @@ class ModelController:
         self._logger.info(f"Number of GPUs set to {self._num_gpus}.")
         return self._num_gpus
 
-    def _count_available_gpus(self) -> int:
+    def count_available_gpus(self) -> int:
         """
         Return the number of available GPUs.
         It might return a negative number if the used GPUs exceed the total number of GPUs, which
@@ -288,7 +288,7 @@ class ModelController:
                 model.deployment_status_reset()
                 self._num_served_models += 1
                 if (
-                    self._count_available_gpus() >= gpus_per_replica
+                    self.count_available_gpus() >= gpus_per_replica
                     or force_load
                     or self._has_autoscaler
                 ):
@@ -454,7 +454,7 @@ class ModelController:
 
             self._logger.info(f"Trying to load model {model_name} into GPUs.")
 
-            available_gpus = self._count_available_gpus()
+            available_gpus = self.count_available_gpus()
             if available_gpus >= model.gpus_per_replica:
                 return self._activate_model(model)
 
@@ -497,7 +497,7 @@ class ModelController:
 
         async with self._lock:
             for model in self._model_pool.values():
-                if model.priority > 2:
+                if model.priority > 1:
                     now = datetime.datetime.now().time()
                     morning = datetime.time(9, 0, 0)
                     night = datetime.time(23, 0, 0)
@@ -607,7 +607,7 @@ class ModelController:
             return {
                 "has_autoscaler": self._has_autoscaler,
                 "num_total_gpus": self._num_gpus,
-                "num_available_gpus:": self._count_available_gpus(),
+                "num_available_gpus:": self.count_available_gpus(),
                 "num_served_models": self._num_served_models,
             }
 

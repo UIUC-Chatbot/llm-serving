@@ -7,6 +7,7 @@ import ray
 from ray import serve
 from ray.serve import Application
 from ray.serve.handle import DeploymentHandle
+import subprocess
 import time
 import yaml
 
@@ -66,6 +67,7 @@ class Daemon:
 
     async def _watch_gpus(self, check_period: int) -> None:
         self._num_gpus: int = await self._controller.update_num_gpus.remote()
+        scale_up: bool = False
         while True:
             try:
                 gpus_available_in_ray: int = ray.cluster_resources().get("GPU", 0)
@@ -74,6 +76,19 @@ class Daemon:
                         f"LLM service has claimed {self._num_gpus} GPUs. There are {gpus_available_in_ray} GPUs available in Ray, updating service."
                     )
                     self._num_gpus = await self._controller.update_num_gpus.remote()
+
+                # Hardcode an autoscaler for slurm, dirty implementation, urrrgh
+                avail_gpus: int = await self._controller.count_available_gpus.remote()
+                if avail_gpus < 0:
+                    if not scale_up:
+                        self._logger.info("Needs more GPUs, scaling up.")
+                        subprocess.run(
+                            ["sbatch", "node.sh"], text=True, capture_output=True
+                        )
+                        scale_up = True
+                else:
+                    scale_up = False
+                # Hardcode finished
             except Exception as e:
                 self._logger.error(f"Error when checking GPUs: {e}")
 
