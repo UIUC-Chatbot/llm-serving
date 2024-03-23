@@ -83,7 +83,7 @@ class Daemon:
                     if not scale_up:
                         self._logger.info("Needs more GPUs, scaling up.")
                         subprocess.run(
-                            ["sbatch", "node.sh"], text=True, capture_output=True
+                            ["sbatch", "config/node.sh"], text=True, capture_output=True
                         )
                         scale_up = True
                 else:
@@ -143,7 +143,7 @@ class Daemon:
                     self._controller.get_or_register_model.remote(
                         "NousResearch/Nous-Hermes-2-Mixtral-8x7B-DPO",
                         ModelType.VLLM_OPENAI,
-                        1,
+                        2,
                         2,
                     )
             except Exception as e:

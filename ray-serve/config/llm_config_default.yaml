@@ -3,7 +3,7 @@
 proxy_location: EveryNode
 http_options:
   host: 0.0.0.0
-  port: 8000
+  port: 5005
 grpc_options:
   port: 9000
   grpc_servicer_functions: []
@@ -15,10 +15,10 @@ logging_config:
 applications:
 - name: llm-serving
   route_prefix: /llm
-  import_path: model_pool:app_builder
+  import_path: model_entrypoint:app_builder
   args:
-    config_file_path: llm_config_default.yaml
-    has_autoscaler: false
+    config_file_path: config/llm_config_default.yaml
+    has_autoscaler: true
     model_reference_path: model_reference.json
   runtime_env: {}
   deployments:
