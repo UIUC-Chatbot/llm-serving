@@ -1,18 +1,9 @@
 import asyncio
 import datetime
-from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, StreamingResponse, Response
-import json
 from logging import getLogger, Logger
-from pydantic import BaseModel
 import ray
-from ray import serve
-from ray.serve import Application
 from ray.serve.exceptions import RayServeException
 import time
-from typing import AsyncGenerator
-from vllm.entrypoints.openai.protocol import ChatCompletionRequest
-
 
 from config_writer import ConfigWriter
 from model_context import ModelContext, ModelStatus, ModelType
@@ -57,46 +48,13 @@ Mental Model:
 """
 
 
-class _AdminRequest(BaseModel):
-    key: str
-    mode: str
-    model_name: str = "meta-llama/Llama-2-7b-chat-hf"
-    model_type: str = "vllm_openai"
-    gpus_per_replica: int = 1
-    force_load: bool = False
-
-
-main_app = FastAPI()
-
-
-@serve.deployment(
-    name="ModelController",
-    ray_actor_options={"num_cpus": 1, "resources": {"head_agents": 1}},
-    logging_config={"enable_access_log": False},
-)
-@serve.ingress(main_app)
 class ModelController:
-    """
-    This class must be deployed on the head node, since it needs to send config file to Ray
-    dashboard service, which might not be accessible from worker nodes.
-    """
-
-    def __init__(
-        self,
-        config_file_path: str,
-        has_autoscaler: bool,
-        model_reference_path: str | None,
-    ) -> None:
+    def __init__(self, config_file_path: str, has_autoscaler: bool) -> None:
         self._config_writer: ConfigWriter = ConfigWriter(config_file_path)
         self._has_autoscaler: bool = has_autoscaler
         self._last_exhaustion_time: float = 0
         self._logger: Logger = getLogger("ray.serve")
         self._model_pool: dict[str, ModelContext] = {}  # Currently registered models
-        self._model_unsupported: dict[str, str] = {}  # Unsupported models
-        if model_reference_path is not None:
-            self.load_model_reference(model_reference_path)
-        else:
-            self._model_reference: dict = {}
         self._num_gpus: int = int(ray.cluster_resources().get("GPU", 0))
         self._num_served_models: int = 0
 
@@ -112,28 +70,15 @@ class ModelController:
         Apply the initial config, just in case the ModelController is restarted during service for
         some reason, it's better to restart the whole LLM service, since the model_pool is reset to
         empty and all past information is lost.
-        (assuming the provided config file only has the default configs and no model apps configs)
+        (assuming the provided config file only has the default configs)
         """
         self._config_writer.apply_config()
         if self._has_autoscaler:
-            self._logger.info("LLM Service is running with autoscaler enabled.")
+            self._logger.info("ModelController is running with autoscaler enabled.")
         else:
-            self._logger.info("LLM Service is running without autoscaler.")
-        self._logger.info(f"ModelController initialized with {self._num_gpus} GPUs.")
-        self._logger.info("LLM Service initialized.")
-
-    def load_model_reference(self, model_reference_path: str) -> None:
-        """
-        model_reference is a file that contains important information about the models, such as the
-        number of GPUs required for each model.
-        """
-        try:
-            with open(model_reference_path, "r") as f:
-                self._model_reference = json.load(f)
-            self._logger.info(f"{model_reference_path} successfully loaded.")
-        except FileNotFoundError:
-            self._model_reference = {}
-            self._logger.warning(f"{model_reference_path} not found.")
+            self._logger.info("ModelController is running without autoscaler.")
+        self._logger.info(f"ModelController found {self._num_gpus} GPUs.")
+        self._logger.info("ModelController initialized.")
 
     async def update_num_gpus(self) -> int:
         async with self._lock:
@@ -169,7 +114,6 @@ class ModelController:
             model_name: str = model_context.model_name
             if model_name not in self._model_pool:
                 return False
-
             """
             In rare cases, the app corresponding to the current model context has been removed, but
             a new app with the same model name has been created, therefore the model name can be
@@ -216,22 +160,6 @@ class ModelController:
                     self._last_exhaustion_time = time.time()
                     self._deactivate_models([model])
 
-            elif model_status == ModelStatus.DEPLOY_FAILED:
-                async with self._lock:
-                    model.is_owned = False
-                    model.is_deployment_success = False
-                    if not is_model_in_pool(model):
-                        return False
-                    """
-                    If the deployment fails, then it is very likely something went wrong in the
-                    initialization function, so we should add this model to unsupported list.
-                    """
-                    self._model_unsupported[model.model_name] = model.error_msg
-                    self._logger.warning(f"App {model.app_name} deployment failed.")
-                    self._config_writer.remove_app(model)
-                    self._model_pool.pop(model.model_name)
-                    return False
-
             else:
                 async with self._lock:
                     model.is_owned = False
@@ -256,26 +184,25 @@ class ModelController:
         Return a healthy model_context of the requested model. Create a serve app for the model if
         it's not created yet. Return None if the model deployment is unhealthy.
         """
+
+        async def validate_model(model: ModelContext) -> bool:
+            return await asyncio.shield(self._validate_deployment(model))
+
         if model_name in self._model_pool:
             model: ModelContext = self._model_pool[model_name]
-            if not await asyncio.shield(self._validate_deployment(model)):
+            if not await validate_model(model):  # Model unhealthy
                 return None
             if model.num_active_replicas == 0 and force_load:
                 # If the model is inactive and force_load is True, try to load it into GPUs.
                 async with self._lock:
                     self._activate_model(model)
-                if not await asyncio.shield(self._validate_deployment(model)):
+                if not await validate_model(model):
                     return None
             return model
-
-        if model_name in self._model_unsupported:
-            return None
 
         # Create a new serve app for the requested model
         async with self._lock:
             # Check again because someone else might have added the model before we woke up.
-            if model_name in self._model_unsupported:
-                return None
             if model_name not in self._model_pool:
                 model = ModelContext(
                     app_name=f"{model_name.replace('/', '--')}--{self._num_served_models}",
@@ -303,7 +230,7 @@ class ModelController:
                     )
                 self._model_pool[model_name] = model
 
-        if await asyncio.shield(self._validate_deployment(model)):
+        if await validate_model(model):
             return model
         else:
             return None
@@ -331,13 +258,6 @@ class ModelController:
                     return True
             return False
 
-    async def reset_unsupported(self) -> None:
-        """
-        Reset the unsupported models.
-        """
-        async with self._lock:
-            self._model_unsupported.clear()
-
     async def reset_all(self) -> None:
         """
         Reset LLM services.
@@ -346,7 +266,6 @@ class ModelController:
             all_models = [model for model in self._model_pool.values()]
             self._config_writer.remove_apps(all_models)
             self._model_pool.clear()
-            self._model_unsupported.clear()
             self._logger.info("LLM service reset.")
 
     def _activate_model(self, model: ModelContext) -> None:
@@ -470,7 +389,7 @@ class ModelController:
                 and time.time() - self._last_exhaustion_time > 300
             ):
                 self._logger.info(
-                    f"Trying to deploy model {model_name} even if there are no available GPUs."
+                    f"Trying to activate model {model_name} even if there are no available GPUs."
                 )
                 return self._activate_model(model)
 
@@ -525,254 +444,5 @@ class ModelController:
     def get_current_config(self) -> dict:
         return self._config_writer.get_current_config()
 
-    """
-    Admin API endpoints
-    """
-
-    @main_app.post("/admin")
-    async def admin_call(self, request: _AdminRequest) -> str | dict:
-        # TODO: the key is currently visible on GitHub. We need to change this.
-        if request.key != "IloveRocknRoll":
-            return "Permission denied. Aborting."
-
-        if request.mode == "get":
-            if request.model_type == "empty":
-                model_type = ModelType.EMPTY
-            elif request.model_type == "vllm_raw":
-                model_type = ModelType.VLLM_RAW
-            elif request.model_type == "vllm_openai":
-                model_type = ModelType.VLLM_OPENAI
-            elif request.model_type == "embedding":
-                model_type = ModelType.EMBEDDING
-            else:
-                return "Invalid model type. Aborting."
-
-            if request.model_name in self._model_reference:
-                priority: int = self._model_reference[request.model_name]["priority"]
-                gpus_per_replica: int = self._model_reference[request.model_name][
-                    "gpus_per_replica"
-                ]
-            else:
-                priority: int = 0
-                gpus_per_replica: int = request.gpus_per_replica
-
-            model = await self.get_or_register_model(
-                model_name=request.model_name,
-                model_type=model_type,
-                priority=priority,
-                gpus_per_replica=gpus_per_replica,
-                force_load=request.force_load,
-            )
-            if model is not None:
-                return f"Model {model.model_name} endpoint: {model.route_prefix}"
-            else:
-                if request.model_name in self._model_unsupported:
-                    return f"Model {request.model_name} not supported: {self._model_unsupported[request.model_name]}"
-                else:
-                    return f"Model {request.model_name} initialization failed."
-
-        elif request.mode == "delete":
-            if await self.delete_model_by_model_name(request.model_name):
-                return f"Model {request.model_name} deleted."
-            else:
-                return f"Model {request.model_name} not found."
-
-        elif request.mode == "list":
-            dump_model_pool = []
-            for model in self._model_pool.values():
-                dump_model_pool.append(
-                    {
-                        "model_name": model.model_name,
-                        "model_type": model.model_type,
-                        "priority": model.priority,
-                        "route_prefix": model.route_prefix,
-                        "gpus_per_replica": model.gpus_per_replica,
-                        "num_active_replicas": model.num_active_replicas,
-                    }
-                )
-            dump_model_unsupported = []
-            for model_name, error_message in self._model_unsupported.items():
-                dump_model_unsupported.append(
-                    {"model_name": model_name, "error_message": error_message}
-                )
-            return {
-                "model_pool": dump_model_pool,
-                "model_unsupported": dump_model_unsupported,
-            }
-
-        elif request.mode == "dump_config":
-            return self.get_current_config()
-
-        elif request.mode == "info":
-            return {
-                "has_autoscaler": self._has_autoscaler,
-                "num_total_gpus": self._num_gpus,
-                "num_available_gpus:": self.count_available_gpus(),
-                "num_served_models": self._num_served_models,
-            }
-
-        elif request.mode == "reset_unsupported":
-            await self.reset_unsupported()
-            return "Unsupported models reset."
-
-        elif request.mode == "reset_all":
-            await self.reset_all()
-            return "LLM service reset."
-
-        else:
-            return "Invalid mode. Aborting."
-
-    @main_app.get("/hot-models")
-    def get_hot_models(self) -> dict:
-        hot_models = []
-        cold_models = []
-        for model in self._model_pool.values():
-            if model.num_active_replicas > 0:
-                hot_models.append(
-                    {
-                        "model_name": model.model_name,
-                        "priority": model.priority,
-                        "route_prefix": model.route_prefix,
-                    }
-                )
-            else:
-                cold_models.append(
-                    {
-                        "model_name": model.model_name,
-                        "priority": model.priority,
-                        "route_prefix": model.route_prefix,
-                    }
-                )
-
-        return {"hot_models": hot_models, "cold_models": cold_models}
-
-    """
-    OpenAI-ish API endpoints
-    """
-
-    @main_app.get("/health")
-    async def health(self) -> Response:
-        """Health check."""
-        return Response(status_code=200)
-
-    @main_app.get("/v1/models")
-    async def show_available_models(self):
-        def model_dump(models: list[dict]):
-            for model in self._model_pool.values():
-                model_info: dict = {
-                    "id": model.model_name,
-                    "object": "model",
-                    "created": model.created_time,
-                    "owned_by": "NCSA",
-                }
-                models.append(model_info)
-
-        models = []
-        model_dump(models)
-        return {"object": "list", "data": models}
-
-    @main_app.post("/v1/chat/completions")
-    async def create_chat_completion(
-        self, request: ChatCompletionRequest, raw_request: Request
-    ):
-        async def retry_func(func, num_retries):
-            retry_count = 0
-            while retry_count < num_retries:
-                try:
-                    return await func()
-                except RayServeException:
-                    retry_count += 1
-                    await asyncio.sleep(0.1)
-                except Exception as e:
-                    raise e
-            return JSONResponse(
-                content="Service Temporarily Unavailable", status_code=503
-            )
-
-        async def create_batch_request(model: ModelContext) -> JSONResponse:
-            is_success, response = await model.app_handle.options(
-                stream=False
-            ).create_chat_completion_batch.remote(request)
-
-            if is_success:
-                return JSONResponse(content=response)
-            else:
-                raise RayServeException("Model Not Available")
-
-        async def create_stream_request(model: ModelContext) -> StreamingResponse:
-
-            async def put_first_back(generator, first_item) -> AsyncGenerator:
-                yield first_item
-                async for item in generator:
-                    yield item
-
-            generator = model.app_handle.options(
-                stream=True
-            ).create_chat_completion_stream.remote(request)
-
-            try:  # If the model is not available yet, it would return an empty generator
-                first_item = await anext(generator)
-            except:
-                raise RayServeException("Model Not Available")
-
-            # Since we have already consumed the first item, we need to put it back
-            valid_generator = put_first_back(generator, first_item)
-
-            return StreamingResponse(
-                content=valid_generator, media_type="text/event-stream"
-            )
-
-        async def main_func():
-            if request.model in self._model_reference:
-                priority: int = self._model_reference[request.model]["priority"]
-                gpus_per_replica: int = self._model_reference[request.model][
-                    "gpus_per_replica"
-                ]
-            else:
-                priority: int = 0
-                gpus_per_replica = 1
-            # Huggingface key authorization
-            hf_key = None
-            auth_header = raw_request.headers.get("Authorization")
-            if auth_header and auth_header.startswith("Bearer "):
-                token = auth_header.split(" ")[1]
-                if token.startswith("hf_"):
-                    hf_key = token
-                else:
-                    self._logger.info("Received invalid huggingface key.")
-
-            model = await self.get_or_register_model(
-                model_name=request.model,
-                model_type=ModelType.VLLM_OPENAI,
-                priority=priority,
-                gpus_per_replica=gpus_per_replica,
-                hf_key=hf_key,
-            )
-            if model is None:
-                if request.model in self._model_unsupported:
-                    return JSONResponse(
-                        content=self._model_unsupported[request.model], status_code=400
-                    )
-                else:
-                    return JSONResponse(
-                        content="Model is not supported.", status_code=400
-                    )
-
-            if request.stream:
-                return await create_stream_request(model)
-            else:
-                return await create_batch_request(model)
-
-        return await retry_func(main_func, 2)
-
-
-class _ControllerArgs(BaseModel):
-    config_file_path: str
-    has_autoscaler: bool = False
-    model_reference_path: str | None = None
-
-
-def app_builder(args: _ControllerArgs) -> Application:
-    return ModelController.bind(
-        args.config_file_path, args.has_autoscaler, args.model_reference_path
-    )
+    def get_model_pool(self) -> dict[str, ModelContext]:
+        return self._model_pool

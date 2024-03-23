@@ -3,7 +3,7 @@
 proxy_location: EveryNode
 http_options:
   host: 0.0.0.0
-  port: 5005
+  port: 8000
 grpc_options:
   port: 9000
   grpc_servicer_functions: []
@@ -18,18 +18,18 @@ applications:
   import_path: model_entrypoint:app_builder
   args:
     config_file_path: config/llm_config_default.yaml
-    has_autoscaler: true
-    model_reference_path: model_reference.json
+    has_autoscaler: false
+    model_reference_path: config/model_reference.json
   runtime_env: {}
   deployments:
-  - name: ModelController
+  - name: MainApp
     num_replicas: 1
 - name: llm-daemon
   route_prefix: /daemon
   import_path: model_daemon:app_builder
   args:
-    controller: llm-serving
-    clean_period: 1200
+    main: llm-serving
+    clean_period: 1100
     dump_period: 600
     gpu_check_period: 10
     health_check_period: 65

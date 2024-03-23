@@ -24,8 +24,8 @@ class ModelApp(ModelAppInterface):
     A thin wrapper class for the model to be served.
     """
 
-    def __init__(self, model_name: str, controller: str, gpus_per_replica: int) -> None:
-        self._controller_app: DeploymentHandle = serve.get_app_handle(controller)
+    def __init__(self, model_name: str, main: str, gpus_per_replica: int) -> None:
+        self._main: DeploymentHandle = serve.get_app_handle(main)
         self._is_active: bool = False
         self._model: LLM | None = None
         self._model_name: str = model_name
@@ -36,7 +36,7 @@ class ModelApp(ModelAppInterface):
     async def _check_model_availability(self) -> bool:
         if self._is_active:
             return True
-        await self._controller_app.handle_unavailable_model.remote(self._model_name)
+        await self._main.handle_unavailable_model.remote(self._model_name)
         return False
 
     @app.post("/")
@@ -78,4 +78,4 @@ class ModelApp(ModelAppInterface):
 
 
 def app_builder(args: ModelAppArgs) -> Application:
-    return ModelApp.bind(args.model_name, args.controller, args.gpus_per_replica)
+    return ModelApp.bind(args.model_name, args.main, args.gpus_per_replica)

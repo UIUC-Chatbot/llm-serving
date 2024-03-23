@@ -169,7 +169,7 @@ class _FakeRequest:
 @serve.ingress(app)
 class ModelApp(ModelAppInterface):
 
-    def __init__(self, model_name: str, controller: str, gpus_per_replica: int) -> None:
+    def __init__(self, model_name: str, main: str, gpus_per_replica: int) -> None:
         self.args = parse_args(model_name, gpus_per_replica)
         self.logger = init_logger(__name__)
 
@@ -215,7 +215,7 @@ class ModelApp(ModelAppInterface):
 
         # LLM-serving related fields
         self._is_active: bool = False
-        self._controller_app = serve.get_app_handle(controller)
+        self._main = serve.get_app_handle(main)
         self._last_served_time: float = time.time()
         self._unhandled_requests: int = 0
 
@@ -250,7 +250,7 @@ class ModelApp(ModelAppInterface):
         if self._is_active:
             self._last_served_time = time.time()
             return True
-        await self._controller_app.handle_unavailable_model.remote(self.served_model)
+        await self._main.handle_unavailable_model.remote(self.served_model)
         return False
 
     @app.exception_handler(RequestValidationError)
@@ -350,4 +350,4 @@ class ModelApp(ModelAppInterface):
 
 
 def app_builder(args: ModelAppArgs):
-    return ModelApp.bind(args.model_name, args.controller, args.gpus_per_replica)
+    return ModelApp.bind(args.model_name, args.main, args.gpus_per_replica)

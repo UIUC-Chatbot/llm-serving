@@ -30,18 +30,18 @@ class Daemon:
 
     def __init__(
         self,
-        controller: str,
+        main: str,
         clean_period: int,
         dump_period: int,
         gpu_check_period: int,
         health_check_period: int,
     ) -> None:
         time.sleep(90)  # ModelController might take a while to start, wait for it
-        self._controller: DeploymentHandle = serve.get_app_handle(controller)
+        self._main: DeploymentHandle = serve.get_app_handle(main)
         self._logger: Logger = getLogger("ray.serve")
         self._watch_list: dict[str, int] = {}
 
-        self._logger.info(f"Daemon initialized with controller {controller}")
+        self._logger.info(f"Daemon initialized with controller {main}")
 
         if clean_period > 0:
             self._logger.info(
@@ -52,7 +52,7 @@ class Daemon:
         if dump_period > 0:
             self._logger.info(f"Dumping current config every {dump_period} seconds.")
             asyncio.create_task(
-                self._dump_current_config("current_config.yaml", dump_period)
+                self._dump_current_config("config/current_config.yaml", dump_period)
             )
 
         if gpu_check_period > 0:
@@ -66,7 +66,7 @@ class Daemon:
             asyncio.create_task(self._check_service_status(health_check_period))
 
     async def _watch_gpus(self, check_period: int) -> None:
-        self._num_gpus: int = await self._controller.update_num_gpus.remote()
+        self._num_gpus: int = await self._main.update_num_gpus.remote()
         scale_up: bool = False
         while True:
             try:
@@ -75,10 +75,10 @@ class Daemon:
                     self._logger.info(
                         f"LLM service has claimed {self._num_gpus} GPUs. There are {gpus_available_in_ray} GPUs available in Ray, updating service."
                     )
-                    self._num_gpus = await self._controller.update_num_gpus.remote()
+                    self._num_gpus = await self._main.update_num_gpus.remote()
 
                 # Hardcode an autoscaler for slurm, dirty implementation, urrrgh
-                avail_gpus: int = await self._controller.count_available_gpus.remote()
+                avail_gpus: int = await self._main.count_available_gpus.remote()
                 if avail_gpus < 0:
                     if not scale_up:
                         self._logger.info("Needs more GPUs, scaling up.")
@@ -117,9 +117,7 @@ class Daemon:
                             self._logger.warning(
                                 f"App {app_name} is still unhealthy after 3 checks, remove it."
                             )
-                            await self._controller.delete_model_by_app_name.remote(
-                                app_name
-                            )
+                            await self._main.delete_model_by_app_name.remote(app_name)
                             self._watch_list.pop(app_name)
                             self._logger.warning(
                                 f"Unhealthy App {app_name} has been removed."
@@ -133,14 +131,14 @@ class Daemon:
         while True:
             try:
                 self._logger.info("Cleaning unpopular models.")
-                self._controller.clean_unpopular_models.remote()
+                self._main.clean_unpopular_models.remote()
 
                 now = datetime.datetime.now().time()
                 morning = datetime.time(9, 0, 0)
                 elapsed = datetime.time(9, 40, 0)
                 if now > morning and now < elapsed:
                     self._logger.info("Activate low-latency model.")
-                    self._controller.get_or_register_model.remote(
+                    self._main.get_or_register_model.remote(
                         "NousResearch/Nous-Hermes-2-Mixtral-8x7B-DPO",
                         ModelType.VLLM_OPENAI,
                         2,
@@ -154,9 +152,7 @@ class Daemon:
     async def _dump_current_config(self, dump_path: str, dump_period: int) -> None:
         while True:
             try:
-                current_config: dict = (
-                    await self._controller.get_current_config.remote()
-                )
+                current_config: dict = await self._main.get_current_config.remote()
                 with open(dump_path, "w") as f:
                     yaml.dump(current_config, f, sort_keys=False)
             except Exception as e:
@@ -166,7 +162,7 @@ class Daemon:
 
 
 class _DaemonArgs(BaseModel):
-    controller: str
+    main: str
     clean_period: int  # time period between model cleanups, in seconds
     dump_period: int  # time period between config file dumps, in seconds
     gpu_check_period: int  # time period between GPU checks, in seconds
@@ -175,7 +171,7 @@ class _DaemonArgs(BaseModel):
 
 def app_builder(args: _DaemonArgs) -> Application:
     return Daemon.bind(
-        args.controller,
+        args.main,
         args.clean_period,
         args.dump_period,
         args.gpu_check_period,

@@ -217,8 +217,8 @@ class ConfigWriter:
                 "import_path": import_path,
                 "args": {
                     "model_name": model.model_name,
-                    # ModelController is the first app in the config file.
-                    "controller": self._config["applications"][0]["name"],
+                    # MainApp is the first app in the config file.
+                    "main": self._config["applications"][0]["name"],
                     "gpus_per_replica": model.gpus_per_replica,
                 },
                 "deployments": deployments,

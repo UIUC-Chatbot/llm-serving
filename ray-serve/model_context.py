@@ -19,6 +19,9 @@ class ModelType(Enum):
     VLLM_OPENAI = 2  # VLLM OpenAI-Compatible server
     EMBEDDING = 3  # Embedding model
 
+    def __str__(self) -> str:
+        return self.name
+
 
 class ModelPath:
     @staticmethod
