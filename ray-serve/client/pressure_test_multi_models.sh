@@ -26,8 +26,8 @@ models=(
 )
 NUM_TOTAL_MODELS=${#models[@]}
 
-if  [[ $# -ne 3 ]]; then
-    echo "Accepts 3 arguments: <num_models> <num_users_per_model> <endpoint>"
+if  [[ $# -ne 4 ]]; then
+    echo "Accepts 4 arguments: <num_models> <num_users_per_model> <endpoint> <hf_key>"
     exit 1
 fi
 
@@ -44,6 +44,10 @@ echo "Number of users per model: $NUM_USERS_PER_MODEL"
 
 ENDPOINT=$3
 echo "Endpoint: $ENDPOINT"
+
+HF_KEY=$4
+echo "HF key: $HF_KEY"
+
 echo ""
 
 sleep 3
@@ -53,7 +57,7 @@ declare -a PIDS
 
 for i in $(seq 0 $((${NUM_MODELS_TO_TEST} - 1))); do
     model=${models[${i}]}
-    ./pressure_test_single_model.sh ${NUM_USERS_PER_MODEL} ${model} ${ENDPOINT} &
+    ./pressure_test_single_model.sh ${NUM_USERS_PER_MODEL} ${model} ${ENDPOINT} ${HF_KEY} &
    PIDS[${i}]=$!
 done
 

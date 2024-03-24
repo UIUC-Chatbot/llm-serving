@@ -12,8 +12,8 @@ cleanup() {
 # Trap Ctrl-C (SIGINT) and call cleanup function
 trap cleanup SIGINT
 
-if  [[ $# -ne 3 ]]; then
-    echo "Accepts 3 arguments: <num_users> <model_name> <endpoint>"
+if  [[ $# -ne 4 ]]; then
+    echo "Accepts 4 arguments: <num_users> <model_name> <endpoint> <hf_key>"
     exit 1
 fi
 
@@ -26,10 +26,13 @@ echo "Model name: $MODEL_NAME"
 ENDPOINT=$3
 echo "Endpoint: $ENDPOINT"
 
+HF_KEY=$4
+echo "HF key: $HF_KEY"
+
 sleep 3
 
 for i in $(seq 1 ${NUM_USERS}); do
-   python openai_client.py -e ${ENDPOINT} --model-name ${MODEL_NAME} -l -s &
+   python openai_client.py -e ${ENDPOINT} --model-name ${MODEL_NAME} -k ${HF_KEY} -l -s &
 done
 
 wait

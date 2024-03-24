@@ -180,7 +180,7 @@ class MainApp(ModelController):
         return JSONResponse(status_code=200, content="LLM service reset.")
 
     @main_app.post("/admin/info")
-    async def admin_info(self, request: _AdminDelModelReq) -> JSONResponse:
+    async def admin_info(self, request: _AdminReq) -> JSONResponse:
         if not self._verify_key(request.key):
             return JSONResponse(status_code=403, content="Permission denied. Aborting.")
         service_info: dict = {
