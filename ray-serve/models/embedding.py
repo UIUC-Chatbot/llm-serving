@@ -4,6 +4,7 @@ import httpx
 from logging import getLogger, Logger
 from model_app import ModelAppInterface, ModelAppArgs
 import psutil
+from pydantic import BaseModel, ConfigDict
 from ray import serve
 from ray.serve import Application
 from ray.serve.handle import DeploymentHandle
@@ -11,6 +12,11 @@ import socket
 import subprocess
 import time
 from typing import Any
+
+
+class _hfEmbeddingReq(BaseModel):
+    model: str
+    model_config = ConfigDict(extra="allow")
 
 
 app = FastAPI()
@@ -75,7 +81,9 @@ class ModelApp(ModelAppInterface):
             ]
             # Start the command in the background
             process = subprocess.Popen(command)
-            time.sleep(3)
+
+            # TODO: use program output to check the model status
+            time.sleep(10)  # Wait for the model to be ready
             child_pids = []
             for proc in psutil.process_iter(attrs=["pid", "ppid"]):
                 if proc.ppid() == process.pid:
@@ -122,6 +130,32 @@ class ModelApp(ModelAppInterface):
                 status_code=response.status_code,
                 headers=dict(response.headers),
             )
+
+    async def create_request(
+        self, request: _hfEmbeddingReq, http_method: str, full_path: str
+    ) -> tuple[bool, Any]:
+        self._last_served_time = time.time()
+        if not await self._check_model_availability():
+            return False, None
+
+        # Forward the user request to the embedding model server
+        target_url = f"http://localhost:{self._port}/{full_path}"
+
+        async with httpx.AsyncClient() as client:
+            if http_method.upper() == "GET":
+                response = await client.request(http_method, target_url)
+                content = response.json()
+
+            elif http_method.upper() == "POST":
+                response = await client.request(
+                    http_method, target_url, json=request.model_dump()
+                )
+                content = response.json()
+
+            else:
+                content = "method not allowed."
+
+            return True, content
 
     def collect_eviction_defense_metrics(self) -> dict[str, Any]:
         return {"last_served_time": self._last_served_time}

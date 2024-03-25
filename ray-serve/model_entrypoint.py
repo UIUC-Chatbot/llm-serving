@@ -2,7 +2,7 @@ import asyncio
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse, Response
 import json
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from ray import serve
 from ray.serve import Application
 from ray.serve.exceptions import RayServeException
@@ -35,6 +35,11 @@ class _AdminDelModelReq(BaseModel):
 
 class _AdminReq(BaseModel):
     key: str
+
+
+class _hfEmbeddingReq(BaseModel):
+    model: str
+    model_config = ConfigDict(extra="allow")
 
 
 main_app = FastAPI()
@@ -200,6 +205,22 @@ class MainApp(ModelController):
         return JSONResponse(status_code=200, content=config_file)
 
     """
+    A helper function for retrying a function.
+    """
+
+    async def _retry_func(self, func, num_retries):
+        retry_count = 0
+        while retry_count < num_retries:
+            try:
+                return await func()
+            except RayServeException:
+                retry_count += 1
+                await asyncio.sleep(0.1)
+            except Exception as e:
+                raise e
+        return JSONResponse(content="Service Temporarily Unavailable", status_code=503)
+
+    """
     OpenAI API endpoints
     """
 
@@ -222,19 +243,6 @@ class MainApp(ModelController):
     async def create_chat_completion(
         self, request: ChatCompletionRequest, raw_request: Request
     ):
-        async def retry_func(func, num_retries):
-            retry_count = 0
-            while retry_count < num_retries:
-                try:
-                    return await func()
-                except RayServeException:
-                    retry_count += 1
-                    await asyncio.sleep(0.1)
-                except Exception as e:
-                    raise e
-            return JSONResponse(
-                content="Service Temporarily Unavailable", status_code=503
-            )
 
         async def create_batch_request(model: ModelContext) -> JSONResponse:
             is_success, response = await model.app_handle.options(
@@ -304,26 +312,54 @@ class MainApp(ModelController):
             else:
                 return await create_batch_request(model)
 
-        return await retry_func(main_func, 2)
+        return await self._retry_func(main_func, 2)
 
     """
     Huggingface Embedding API endpoints
     """
 
-    @main_app.get("/hf_embedding/{full_path:path}")
-    @main_app.post("/hf_embedding/{full_path:path}")
-    async def create_embedding(self, full_path: str, request: Request) -> JSONResponse:
-        self._logger.info(f"Received request for embedding: {full_path}")
-        data = await request.json()
-        self._logger.info(f"Received data: {data}")
-        try:
-            model_name: str = data["model"]
-        except KeyError:
-            return JSONResponse(content="Model name is not specified.", status_code=400)
+    @main_app.get("/hf_embed/{full_path:path}")
+    @main_app.post("/hf_embed/{full_path:path}")
+    async def create_embedding(
+        self, full_path: str, request: _hfEmbeddingReq, raw_request: Request
+    ) -> JSONResponse:
 
-        self._logger.info(f"Model name: {model_name}")
+        async def main_func():
+            if request.model in self._model_reference:
+                priority: int = self._model_reference[request.model]["priority"]
+            else:
+                priority: int = 0
 
-        return JSONResponse(content="Model is not supported.", status_code=400)
+            # Huggingface key authorization
+            hf_key = None
+            auth_header = raw_request.headers.get("Authorization")
+            if auth_header and auth_header.startswith("Bearer "):
+                token = auth_header.split(" ")[1]
+                if token.startswith("hf_"):
+                    hf_key = token
+                else:
+                    self._logger.info("Received invalid huggingface key.")
+
+            model = await self.get_or_register_model(
+                model_name=request.model,
+                model_type=ModelType.EMBEDDING,
+                priority=priority,
+                gpus_per_replica=1,  # Assume embedding model uses 1 GPU only
+                hf_key=hf_key,
+            )
+            if model is None:
+                return JSONResponse(content="Model is not supported.", status_code=400)
+
+            is_success, response = await model.app_handle.create_request.remote(
+                request, raw_request.method, full_path
+            )
+
+            if is_success:
+                return JSONResponse(content=response)
+            else:
+                raise RayServeException("Model Not Available")
+
+        return await self._retry_func(main_func, 2)
 
 
 class _MainArgs(BaseModel):
