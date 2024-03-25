@@ -7,6 +7,7 @@ import psutil
 from pydantic import BaseModel, ConfigDict
 from ray import serve
 from ray.serve import Application
+from ray.serve.exceptions import RayServeException
 from ray.serve.handle import DeploymentHandle
 import socket
 import subprocess
@@ -64,35 +65,58 @@ class ModelApp(ModelAppInterface):
 
     def reconfigure(self, config: dict[str, Any]) -> None:
         self._is_active = config["is_active"]
-        if self._is_active:
-            self._find_available_port()
-            command = [
-                "apptainer",
-                "run",
-                "--writable-tmpfs",
-                "--nv",
-                "docker://ghcr.io/huggingface/text-embeddings-inference:1.1",
-                "--model-id",
-                f"{self._model_name}",
-                "--hostname",
-                "0.0.0.0",
-                "-p",
-                f"{self._port}",
-            ]
-            # Start the command in the background
-            process = subprocess.Popen(command)
-
-            # TODO: use program output to check the model status
-            time.sleep(10)  # Wait for the model to be ready
-            child_pids = []
-            for proc in psutil.process_iter(attrs=["pid", "ppid"]):
-                if proc.ppid() == process.pid:
-                    child_pids.append(proc.pid)
-            self._logger.info(
-                f"Embedding model {self._model_name} launched, pid: {process.pid}, child_pids: {child_pids}"
-            )
-        else:
+        if not self._is_active:
             self._logger.info(f"Embedding model {self._model_name} inactive")
+            return
+
+        self._find_available_port()
+
+        command = [
+            "apptainer",
+            "run",
+            "--writable-tmpfs",
+            "--nv",
+            "docker://ghcr.io/huggingface/text-embeddings-inference:1.1",
+            "--model-id",
+            f"{self._model_name}",
+            "--hostname",
+            "0.0.0.0",
+            "-p",
+            f"{self._port}",
+        ]
+        # Start the command in the background
+        process = subprocess.Popen(
+            command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+        )
+
+        stdout = process.stdout
+        if stdout is None:
+            raise RayServeException("Stdout of the process is None.")
+
+        while True:  # Check model status
+            time.sleep(1)
+            exit_code = process.poll()
+            if exit_code is not None:
+                self._logger.warning(
+                    f"Embedding model {self._model_name} exited with code {exit_code}"
+                )
+                raise RayServeException(
+                    f"Embedding model {self._model_name} exited with code {exit_code}"
+                )
+            else:
+                line = stdout.readline()
+                self._logger.debug(line)
+                if "Ready" in line:
+                    self._logger.info("Model is ready.")
+                    break
+
+        child_pids = []
+        for proc in psutil.process_iter(attrs=["pid", "ppid"]):
+            if proc.ppid() == process.pid:
+                child_pids.append(proc.pid)
+        self._logger.info(
+            f"Embedding model {self._model_name} launched, pid: {process.pid}, child_pids:{child_pids}"
+        )
 
     @app.get("/{full_path:path}")
     @app.post("/{full_path:path}")
@@ -134,6 +158,9 @@ class ModelApp(ModelAppInterface):
     async def create_request(
         self, request: _hfEmbeddingReq, http_method: str, full_path: str
     ) -> tuple[bool, Any]:
+        """
+        For internal use only. This method is called by the controller to get the embedding result.
+        """
         self._last_served_time = time.time()
         if not await self._check_model_availability():
             return False, None

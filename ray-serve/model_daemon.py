@@ -97,7 +97,17 @@ class Daemon:
     async def _check_service_status(self, check_period: int) -> None:
         while True:
             try:
+                self._logger.debug(f"Watch list: {self._watch_list}")
                 app_status: dict = serve.status().applications
+
+                # Remove apps from watch list if they no longer exist
+                apps_to_ignore = [
+                    app for app in self._watch_list if app not in app_status
+                ]
+                for app in apps_to_ignore:
+                    self._watch_list.pop(app)
+
+                # Check if any apps are unhealthy
                 for app_name, app in app_status.items():
                     is_good: bool = True
                     if app.status == "UNHEALTHY":
