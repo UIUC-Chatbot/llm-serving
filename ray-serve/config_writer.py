@@ -125,7 +125,7 @@ class ConfigWriter:
             ]
 
         else:  # Distributed inference
-            placement_group_strategy = "STRICT_PACK"
+            placement_group_strategy = "PACK"
             if is_active:
                 placement_group_bundles = [
                     {"CPU": 1, "GPU": 1} for _ in range(model.gpus_per_replica)
