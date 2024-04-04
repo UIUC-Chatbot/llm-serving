@@ -87,23 +87,15 @@ class Daemon:
                         jobID = output.split()[-1]
                         self._logger.info(f"Job submitted, job ID: {jobID}")
                     else:
-                        squeue_output = subprocess.run(
-                            ["squeue", "-j", jobID, "--format=%T"],
-                            capture_output=True,
-                            text=True,
-                            check=True,
-                        )
-                        if (
-                            not squeue_output.stdout.strip()
-                            or "Invalid job id specified" in squeue_output.stdout
-                        ):
-                            self._logger.info(f"Job {jobID} no longer exists.")
-                            jobID = "NONE"
-                        else:
-                            status = squeue_output.stdout.splitlines()[1]
-                            self._logger.info(f"Job {jobID} status: {status}")
-                            if status == "RUNNING":
-                                jobID = "NONE"
+                        logfile = f"ray-worker-{jobID}.log"
+                        with open(logfile, "r") as file:
+                            for line in file:
+                                if "Ray worker failed to start" in line:
+                                    self._logger.info(f"Job {jobID} failed.")
+                                    jobID = "NONE"
+                                elif "Ray worker started successfully" in line:
+                                    self._logger.info(f"Job {jobID} succeeded.")
+                                    jobID = "NONE"
                 else:
                     jobID = "NONE"
                 # Hardcode finished
