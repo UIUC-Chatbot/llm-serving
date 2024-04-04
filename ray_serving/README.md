@@ -3,7 +3,7 @@
 ## Usage
 
 1. Install Ray and Ray Serve. `pip install -r config/requirements.txt`.
-1. Navigate to **/ray-serve/**.
+1. Navigate to **/ray_serving/**.
 1. Start Ray cluster, e.g. `ray start --head --disable-usage-stats --resources='{"head_agents": 2}' --num-gpus=$(GPU_COUNT)`.  
     - `head_agent` is a custom resource that is used to force some important processes to be deployed on the head node.
     - Python `import_path` depends on the location where Ray was started, so make sure to start Ray in the correct directory.
@@ -11,7 +11,7 @@
 1. Use [**config file**](https://docs.ray.io/en/latest/serve/production-guide/config.html#serve-in-production-config-file) to specify the model and the serving configuration.
 1. Start llm-serving: `serve deploy $(config file)`. You can use default config file: `serve deploy config/llm_config_default.yaml`.
 1. If your server environment is incompatible with Ray autoscaler, e.g., not using cloud service, then you might have to manually start worker nodes and connect them to the head node. For example, login to a worker node and run `ray start --address=$(head_node_address)`. Please refer to [**Ray Cluster Management CLI**](https://docs.ray.io/en/latest/cluster/cli.html) for more information.
-1. Open Ray dashboard to view the status of the LLM serving system. You can access the dashboard by visiting `http://127.0.0.1:8265/` on the head node. (Dashboard might contain private information and shouldn't be exposed to the public)
+1. Open Ray dashboard to view the status of the LLM serving system. You can access the dashboard by visiting `http://127.0.0.1:8265/` (default to 8265) on the head node. (Dashboard might contain private information and shouldn't be exposed to the public)
     - Users can send requests using OpenAI api.
     - Administrators can directly manage the model pool by using **admin_client**.
 
