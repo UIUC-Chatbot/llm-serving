@@ -7,8 +7,16 @@
 #SBATCH --time=01:00:00                 # Time limit hrs:min:sec
 #SBATCH --output=ray-worker-%j.log      # Standard output and error log
 
-ray start --address='10.10.109.244:6379' # Command to run
-while true
-do
-    sleep 300
-done
+ray start --address='10.10.109.243:6379' # Command to run
+
+if [ $? -eq 0 ]; then
+    echo "Ray worker started successfully"
+    while true
+    do
+        sleep 300
+    done
+
+else
+    echo "Ray worker failed to start"
+    exit 1
+fi

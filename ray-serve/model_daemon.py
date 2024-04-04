@@ -1,5 +1,4 @@
 import asyncio
-import datetime
 from fastapi import FastAPI
 from logging import getLogger, Logger
 from pydantic import BaseModel
@@ -10,8 +9,6 @@ from ray.serve.handle import DeploymentHandle
 import subprocess
 import time
 import yaml
-
-from model_context import ModelType
 
 
 daemon_app = FastAPI()
@@ -67,7 +64,7 @@ class Daemon:
 
     async def _watch_gpus(self, check_period: int) -> None:
         self._num_gpus: int = await self._main.update_num_gpus.remote()
-        scale_up: bool = False
+        jobID: str = "NONE"
         while True:
             try:
                 gpus_available_in_ray: int = ray.cluster_resources().get("GPU", 0)
@@ -80,15 +77,37 @@ class Daemon:
                 # Hardcode an autoscaler for slurm, dirty implementation, urrrgh
                 avail_gpus: int = await self._main.count_available_gpus.remote()
                 if avail_gpus < 0:
-                    if not scale_up:
+                    if jobID == "NONE":
                         self._logger.info("Needs more GPUs, scaling up.")
-                        subprocess.run(
+                        slurm_proc = subprocess.run(
                             ["sbatch", "config/node.sh"], text=True, capture_output=True
                         )
-                        scale_up = True
+                        # Standard output is in the format: "Submitted batch job <JobID>"
+                        output = slurm_proc.stdout.strip()
+                        jobID = output.split()[-1]
+                        self._logger.info(f"Job submitted, job ID: {jobID}")
+                    else:
+                        squeue_output = subprocess.run(
+                            ["squeue", "-j", jobID, "--format=%T"],
+                            capture_output=True,
+                            text=True,
+                            check=True,
+                        )
+                        if (
+                            not squeue_output.stdout.strip()
+                            or "Invalid job id specified" in squeue_output.stdout
+                        ):
+                            self._logger.info(f"Job {jobID} no longer exists.")
+                            jobID = "NONE"
+                        else:
+                            status = squeue_output.stdout.splitlines()[1]
+                            self._logger.info(f"Job {jobID} status: {status}")
+                            if status == "RUNNING":
+                                jobID = "NONE"
                 else:
-                    scale_up = False
+                    jobID = "NONE"
                 # Hardcode finished
+
             except Exception as e:
                 self._logger.error(f"Error when checking GPUs: {e}")
 
@@ -142,18 +161,6 @@ class Daemon:
             try:
                 self._logger.info("Cleaning unpopular models.")
                 self._main.clean_unpopular_models.remote()
-
-                now = datetime.datetime.now().time()
-                morning = datetime.time(9, 0, 0)
-                elapsed = datetime.time(9, 40, 0)
-                if now > morning and now < elapsed:
-                    self._logger.info("Activate low-latency model.")
-                    self._main.get_or_register_model.remote(
-                        "NousResearch/Nous-Hermes-2-Mixtral-8x7B-DPO",
-                        ModelType.VLLM_OPENAI,
-                        2,
-                        2,
-                    )
             except Exception as e:
                 self._logger.error(f"Error when cleaning unpopular models: {e}")
 
