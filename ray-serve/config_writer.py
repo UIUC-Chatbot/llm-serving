@@ -20,9 +20,10 @@ class ConfigWriter:
     Refer to Ray documentation for more details about the format of the config files.
     """
 
-    def __init__(self, config_file_path: str) -> None:
+    def __init__(self, config_file_path: str, dashboard_port: int) -> None:
         with open(config_file_path, "r") as file:
             self._config: dict = yaml.safe_load(file)
+        self._dashboard_port: int = dashboard_port
         self._apps: list[dict] = self._config["applications"]
         self._logger: Logger = getLogger("ray.serve")
 
@@ -34,9 +35,7 @@ class ConfigWriter:
         """
         try:
             ServeDeploySchema.parse_obj(self._config)
-            address: str = os.environ.get(
-                "RAY_DASHBOARD_ADDRESS", "http://localhost:8265"
-            )
+            address = f"http://localhost:{self._dashboard_port}"
             ServeSubmissionClient(address).deploy_applications(self._config)
         except Exception as e:
             self._logger.error(f"Error applying config: {e}")

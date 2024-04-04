@@ -49,8 +49,12 @@ Mental Model:
 
 
 class ModelController:
-    def __init__(self, config_file_path: str, has_autoscaler: bool) -> None:
-        self._config_writer: ConfigWriter = ConfigWriter(config_file_path)
+    def __init__(
+        self, config_file_path: str, dashboard_port: int, has_autoscaler: bool
+    ) -> None:
+        self._config_writer: ConfigWriter = ConfigWriter(
+            config_file_path, dashboard_port
+        )
         self._has_autoscaler: bool = has_autoscaler
         self._last_exhaustion_time: float = 0
         self._logger: Logger = getLogger("ray.serve")

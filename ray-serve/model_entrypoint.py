@@ -60,10 +60,11 @@ class MainApp(ModelController):
     def __init__(
         self,
         config_file_path: str,
+        dashboard_port: int,
         has_autoscaler: bool,
         model_reference_path: str | None,
     ) -> None:
-        super().__init__(config_file_path, has_autoscaler)
+        super().__init__(config_file_path, dashboard_port, has_autoscaler)
         if model_reference_path is not None:
             self.load_model_reference(model_reference_path)
         else:
@@ -364,11 +365,15 @@ class MainApp(ModelController):
 
 class _MainArgs(BaseModel):
     config_file_path: str
+    dashboard_port: int
     has_autoscaler: bool = False
     model_reference_path: str | None = None
 
 
 def app_builder(args: _MainArgs) -> Application:
     return MainApp.bind(
-        args.config_file_path, args.has_autoscaler, args.model_reference_path
+        args.config_file_path,
+        args.dashboard_port,
+        args.has_autoscaler,
+        args.model_reference_path,
     )

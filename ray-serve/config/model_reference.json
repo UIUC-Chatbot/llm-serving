@@ -18,5 +18,9 @@
     "NousResearch/Nous-Hermes-2-Mixtral-8x7B-DPO": {
         "gpus_per_replica": 2,
         "priority": 2
+    },
+    "databricks/dbrx-instruct": {
+        "gpus_per_replica": 4,
+        "priority": 0
     }
 }
