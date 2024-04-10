@@ -93,9 +93,17 @@ class MainApp(ModelController):
         hot_models = []
         cold_models = []
         for model in self._model_pool.values():
+            if model.is_deployment_success is None:
+                status = "Deploying"
+            elif model.is_deployment_success:
+                status = "Running"
+            else:
+                status = "Failed"
+
             model_info: dict = {
                 "model_name": model.model_name,
                 "model_type": str(model.model_type),
+                "status": status,
                 "priority": model.priority,
                 "route_prefix": model.route_prefix,
                 "gpus_per_replica": model.gpus_per_replica,
