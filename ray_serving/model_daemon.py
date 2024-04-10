@@ -151,7 +151,7 @@ class Daemon:
     async def _clean_unpopular_models(self, check_period: int) -> None:
         while True:
             try:
-                self._logger.info("Cleaning unpopular models.")
+                self._logger.debug("Cleaning unpopular models.")
                 self._main.clean_unpopular_models.remote()
             except Exception as e:
                 self._logger.error(f"Error when cleaning unpopular models: {e}")

@@ -37,6 +37,11 @@ class _AdminReq(BaseModel):
     key: str
 
 
+class _AdminModelRefReq(BaseModel):
+    key: str
+    model_reference_path: str
+
+
 class _hfEmbeddingReq(BaseModel):
     model: str
     model_config = ConfigDict(extra="allow")
@@ -212,6 +217,18 @@ class MainApp(ModelController):
             return JSONResponse(status_code=403, content="Permission denied. Aborting.")
         config_file = self.get_current_config()
         return JSONResponse(status_code=200, content=config_file)
+
+    @main_app.post("/admin/load_model_reference")
+    async def admin_load_model_reference(
+        self, request: _AdminModelRefReq
+    ) -> JSONResponse:
+        if not self._verify_key(request.key):
+            return JSONResponse(status_code=403, content="Permission denied. Aborting.")
+        model_reference_path = request.model_reference_path
+        self.load_model_reference(model_reference_path)
+        return JSONResponse(
+            status_code=200, content="Function load_model_reference() executed."
+        )
 
     """
     A helper function for retrying a function.

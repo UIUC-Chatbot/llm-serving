@@ -40,11 +40,16 @@ class AdminClient:
         return response.json()
 
     def dump_config(self, config_dump_path: str) -> None:
-        data = {"key": self._key, "mode": "dump_config"}
+        data = {"key": self._key}
         response = requests.post(f"{self._endpoint}/dump_config", json=data)
         config_file = response.json()
         with open(config_dump_path, "w") as f:
             yaml.dump(config_file, f, sort_keys=False)
+
+    def load_reference(self, reference_path: str) -> None:
+        data = {"key": self._key, "model_reference_path": reference_path}
+        response = requests.post(f"{self._endpoint}/load_model_reference", json=data)
+        return response.json()
 
     def reset_llm_service(self) -> str:
         data = {"key": self._key}
@@ -60,7 +65,7 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--mode",
-        help="0: get model route; 1: delete model; 2: reset LLM service; 3: show service info; 4: dump config",
+        help="0: get model route; 1: delete model; 2: reset LLM service; 3: show service info; 4: dump config; 5: load model reference",
         type=int,
         required=True,
     )
@@ -82,6 +87,9 @@ if __name__ == "__main__":
     parser.add_argument("--hf-key", type=str, default=None)
     parser.add_argument("-f", "--force", help="Force Load", default=None)
     parser.add_argument("--config-dump-path", type=str, default="latest_config.yaml")
+    parser.add_argument(
+        "--model-reference-path", type=str, default="config/model_reference.json"
+    )
     args = parser.parse_args()
 
     admin_client = AdminClient(args.endpoint, args.key)
@@ -111,6 +119,11 @@ if __name__ == "__main__":
     elif args.mode == 4:
         print(f"Dumping config to file {args.config_dump_path}")
         admin_client.dump_config(args.config_dump_path)
+
+    elif args.mode == 5:
+        print(f"Loading model reference from {args.model_reference_path}")
+        res = admin_client.load_reference(args.model_reference_path)
+        print(res)
 
     else:
         print("Invalid mode")

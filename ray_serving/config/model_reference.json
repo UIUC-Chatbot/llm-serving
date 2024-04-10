@@ -22,5 +22,9 @@
     "databricks/dbrx-instruct": {
         "gpus_per_replica": 4,
         "priority": 0
+    },
+    "Qwen/Qwen1.5-32B-Chat": {
+        "gpus_per_replica": 2,
+        "priority": 0
     }
 }
