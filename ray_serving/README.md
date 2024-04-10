@@ -4,7 +4,7 @@
 
 1. Install Ray and Ray Serve. `pip install -r config/requirements.txt`.
 1. Navigate to **/ray_serving/**.
-1. Start Ray cluster, e.g. `ray start --head --disable-usage-stats --resources='{"head_agents": 2}' --num-gpus=$(GPU_COUNT) --temp-dir=$(TMP_DIR)`.  
+1. Start Ray cluster, e.g. `ray start --head --disable-usage-stats --resources='{"head_agents": 2}' --num-gpus=$(GPU_COUNT) --temp-dir=$(TMP_DIR) --dashboard-port=$(PORT)`.  
     - `head_agent` is a custom resource that is used to force some important processes to be deployed on the head node.
     - Python `import_path` depends on the location where Ray was started, so make sure to start Ray in the correct directory.
     - You should run this command on the head node or a node that users can access, since Ray deploys network services on this node.
