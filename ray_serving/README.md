@@ -12,6 +12,7 @@
 1. Start llm-serving: `serve deploy $(config file)`. You can use default config file: `serve deploy config/llm_config_default.yaml`.
 1. If your server environment is incompatible with Ray autoscaler, e.g., not using cloud service, then you might have to manually start worker nodes and connect them to the head node. For example, login to a worker node and run `ray start --address=$(head_node_address)`. Please refer to [**Ray Cluster Management CLI**](https://docs.ray.io/en/latest/cluster/cli.html) for more information.
 1. Open Ray dashboard to view the status of the LLM serving system. You can access the dashboard by visiting `http://127.0.0.1:8265/` (default to 8265) on the head node. (Dashboard might contain private information and shouldn't be exposed to the public)
+    - You can view the document for available endpoints at `$(BASE_URL)/llm/docs`, e.g., <https://api.ncsa.ai/llm/docs>
     - Users can send requests using OpenAI api.
     - Administrators can directly manage the model pool by using **admin_client**.
 

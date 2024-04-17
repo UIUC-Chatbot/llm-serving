@@ -89,7 +89,7 @@ class MainApp(ModelController):
             self._logger.warning(f"{model_reference_path} not found.")
 
     @main_app.get("/health")
-    def health(self) -> Response:
+    def check_health(self) -> Response:
         """Health check."""
         return Response(status_code=200, content="LLM service is healthy.")
 
@@ -251,7 +251,7 @@ class MainApp(ModelController):
     """
 
     @main_app.get("/v1/models")
-    async def show_openai_models(self):
+    async def list_openai_models(self):
         model_pool: dict[str, ModelContext] = self.get_model_pool()
         models = []
         for model in model_pool.values():
@@ -266,7 +266,7 @@ class MainApp(ModelController):
         return {"object": "list", "data": models}
 
     @main_app.post("/v1/chat/completions")
-    async def create_chat_completion(
+    async def create_openai_chat_completion(
         self, request: ChatCompletionRequest, raw_request: Request
     ):
 
@@ -344,9 +344,8 @@ class MainApp(ModelController):
     Huggingface Embedding API endpoints
     """
 
-    @main_app.get("/hf_embed/{full_path:path}")
     @main_app.post("/hf_embed/{full_path:path}")
-    async def create_embedding(
+    async def create_hf_embedding(
         self, full_path: str, request: _hfEmbeddingReq, raw_request: Request
     ) -> JSONResponse:
 
