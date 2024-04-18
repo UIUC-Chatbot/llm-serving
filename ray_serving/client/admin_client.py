@@ -13,8 +13,8 @@ class AdminClient:
         model_name: str,
         model_type: str,
         num_gpus: int,
-        hf_key: str | None,
-        force: bool | None,
+        hf_key: str | None = None,
+        force: bool | None = None,
     ) -> str:
         data = {
             "key": self._key,

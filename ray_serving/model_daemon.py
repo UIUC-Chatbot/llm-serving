@@ -33,8 +33,12 @@ class Daemon:
         gpu_check_period: int,
         health_check_period: int,
     ) -> None:
-        time.sleep(90)  # ModelController might take a while to start, wait for it
-        self._main: DeploymentHandle = serve.get_app_handle(main)
+        while True:
+            try:
+                self._main: DeploymentHandle = serve.get_app_handle(main)
+                break
+            except Exception:
+                time.sleep(10)
         self._logger: Logger = getLogger("ray.serve")
         self._watch_list: dict[str, int] = {}
 
