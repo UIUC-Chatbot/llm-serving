@@ -12,26 +12,36 @@ class AdminClient:
         self,
         model_name: str,
         model_type: str,
-        num_gpus: int,
+        num_replicas: int,
+        gpus_per_replica: int,
+        priority: int,
         hf_key: str | None = None,
-        force: bool | None = None,
     ) -> str:
         data = {
             "key": self._key,
             "model_name": model_name,
             "model_type": model_type,
-            "gpus_per_replica": num_gpus,
+            "num_replicas": num_replicas,
+            "gpus_per_replica": gpus_per_replica,
+            "priority": priority,
         }
         if hf_key is not None:
             data["hf_key"] = hf_key
-        if force is not None:
-            data["force_load"] = force
         response = requests.post(f"{self._endpoint}/get_model", json=data)
         return response.text
 
     def delete_model(self, model_name: str) -> str:
         data = {"key": self._key, "model_name": model_name}
         response = requests.post(f"{self._endpoint}/delete_model", json=data)
+        return response.text
+
+    def load_model(self, model_name: str, num_replicas: int) -> str:
+        data = {
+            "key": self._key,
+            "model_name": model_name,
+            "num_replicas": num_replicas,
+        }
+        response = requests.post(f"{self._endpoint}/load_model", json=data)
         return response.text
 
     def show_info(self) -> dict:
@@ -65,7 +75,7 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--mode",
-        help="0: get model route; 1: delete model; 2: reset LLM service; 3: show service info; 4: dump config; 5: load model reference",
+        help="0: get model route; 1: delete model; 2: load model replicas; 3: reset LLM service; 4: show service info; 5: dump config; 6: load model reference",
         type=int,
         required=True,
     )
@@ -83,9 +93,9 @@ if __name__ == "__main__":
         default="unknown",
     )
     parser.add_argument("--model-type", help="Model Type", type=str, default="unknown")
+    parser.add_argument("--num_replicas", type=int, default=1)
     parser.add_argument("--num-gpus", type=int, default=1)
     parser.add_argument("--hf-key", type=str, default=None)
-    parser.add_argument("-f", "--force", help="Force Load", default=None)
     parser.add_argument("--config-dump-path", type=str, default="latest_config.yaml")
     parser.add_argument(
         "--model-reference-path", type=str, default="config/model_reference.json"
@@ -97,7 +107,11 @@ if __name__ == "__main__":
     if args.mode == 0:
         print(f"Requesting route for model {args.model_name}")
         res = admin_client.get_model_route(
-            args.model_name, args.model_type, args.num_gpus, args.hf_key, args.force
+            args.model_name,
+            args.model_type,
+            args.num_replicas,
+            args.num_gpus,
+            args.hf_key,
         )
         print(res)
 
@@ -107,20 +121,25 @@ if __name__ == "__main__":
         print(res)
 
     elif args.mode == 2:
+        print(f"Loading {args.num_replicas} replicas of model {args.model_name}")
+        res = admin_client.load_model(args.model_name, args.num_replicas)
+        print(res)
+
+    elif args.mode == 3:
         print("Resetting LLM service")
         res = admin_client.reset_llm_service()
         print(res)
 
-    elif args.mode == 3:
+    elif args.mode == 4:
         print("Showing LLM service info")
         res = admin_client.show_info()
         print(res)
 
-    elif args.mode == 4:
+    elif args.mode == 5:
         print(f"Dumping config to file {args.config_dump_path}")
         admin_client.dump_config(args.config_dump_path)
 
-    elif args.mode == 5:
+    elif args.mode == 6:
         print(f"Loading model reference from {args.model_reference_path}")
         res = admin_client.load_reference(args.model_reference_path)
         print(res)

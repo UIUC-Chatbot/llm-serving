@@ -110,7 +110,7 @@ class ModelApp(ModelAppInterface):
         if self._is_active:
             self._last_served_time = time.time()
             return True
-        await self._main.handle_unavailable_model.remote(self._served_model)
+        await self._main.load_model.remote(self._model_name, 1)
         return False
 
     @app.exception_handler(RequestValidationError)

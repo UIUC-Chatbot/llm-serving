@@ -17,9 +17,9 @@ applications:
   route_prefix: /llm
   import_path: model_entrypoint:app_builder
   args:
+    autoscaler_enabled: false
     config_file_path: config/llm_config_default.yaml
     dashboard_port: 8265
-    has_autoscaler: false
     model_reference_path: config/model_reference.json
   runtime_env: {}
   deployments:
@@ -34,6 +34,7 @@ applications:
     dump_period: 600
     gpu_check_period: 10
     health_check_period: 65
+    model_pool_update_period: 0
   runtime_env: {}
   deployments:
   - name: Daemon

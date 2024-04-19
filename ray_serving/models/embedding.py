@@ -60,7 +60,7 @@ class ModelApp(ModelAppInterface):
     async def _check_model_availability(self) -> bool:
         if self._is_active:
             return True
-        await self._main.handle_unavailable_model.remote(self._model_name)
+        await self._main.load_model.remote(self._model_name, 1)
         return False
 
     def reconfigure(self, config: dict[str, Any]) -> None:

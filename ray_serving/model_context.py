@@ -1,8 +1,11 @@
 import asyncio
+from datetime import datetime
 from enum import Enum
 from ray import serve
+from ray.dashboard.modules.serve.sdk import ServeSubmissionClient
 from ray.serve.handle import DeploymentHandle
-import time
+from ray.serve.schema import ApplicationDetails, ReplicaDetails, ServeInstanceDetails
+import re
 
 
 class ModelStatus(Enum):
@@ -51,82 +54,136 @@ class ModelContext:
         app_name: str,
         model_name: str,
         model_type: ModelType,
+        num_active_replicas: int,
+        gpus_per_replica: int,
         priority: int,
         route_prefix: str,
-        gpus_per_replica: int,
     ) -> None:
         self.app_name: str = app_name
         self.app_handle: DeploymentHandle
-        self.error_msg: str = ""  # error message, and possibly stack traces
+        self.created_time: str = datetime.now().strftime("%Y-%m-%d %H:%M")
+        self.error_msg: str = (
+            "Unknown error"  # deployment error message, and possibly stack traces
+        )
+        self.gpus_per_replica: int = gpus_per_replica
         self.is_deployment_success: bool | None = None
         self.is_owned: bool = False
         self.model_name: str = model_name
         self.model_type: ModelType = model_type
+        self.num_active_replicas: int = num_active_replicas
+        self.num_pending_replicas: int = 0
         self.priority: int = priority  # The higher the number, the higher the priority
         self.route_prefix: str = route_prefix
-        self.activation_failed: bool = False
         self.wrapper_name: str = "ModelApp"  # The name of the model deployment
-        self.created_time: int = int(time.time())
-        self.gpus_per_replica: int = gpus_per_replica
-        self.num_active_replicas: int = 0
 
-    def activation_status_reset(self) -> None:
-        self.activation_failed = False
-
-    def deployment_status_reset(self) -> None:
+    def reset_deployment_status(self) -> None:
         self.is_deployment_success = None
 
-    async def check_deployment_status(self) -> ModelStatus:
+    def reset_pending_replica_status(self) -> None:
+        self.num_pending_replicas = 0
+
+    def _check_deployment_status_once(
+        self, dashboard_port: int, check_all: bool
+    ) -> ModelStatus | None:
         """
-        Note that app updates via config file are async, so we might need to wait for a while before
-        the app is actually created or updated.
+        Check the deployment status of the model once.
+        If check_all is True, check all model replicas.
+        If check_all is False, return RUNNING status as long as one replica is running.
         """
-        exhaustion_count: int = 0
-        missing_count: int = 0
-        while True:
-            await asyncio.sleep(1)
-            apps = serve.status().applications
+        try:
+            # Use the dashboard to get the application details
+            dashboard_address = f"http://localhost:{dashboard_port}"
+            serve_details = ServeInstanceDetails(
+                **ServeSubmissionClient(dashboard_address).get_serve_details()
+            )
+            apps: dict[str, ApplicationDetails] = serve_details.applications
 
             if self.app_name not in apps:
-                missing_count += 1
-                if missing_count > 5:
-                    return ModelStatus.NONEXISTENT
-                continue
-            missing_count = 0
+                return ModelStatus.NONEXISTENT
 
-            app_status = apps[self.app_name].status
+            app_details: ApplicationDetails = apps[self.app_name]
+            app_status = app_details.status
+            deployment_details = app_details.deployments[self.wrapper_name]
+            deployment_msg = deployment_details.message
 
-            if app_status == "RUNNING":
+            if app_status == "RUNNING":  # All model replicas are deployed and running
                 self.app_handle = serve.get_app_handle(self.app_name)
                 return ModelStatus.RUNNING
 
-            elif app_status == "DEPLOYING":
-                """
-                Ideally, Ray should provide an API which returns whether the deployment is waiting
-                for resources or is just spending a long time in the initialization.
-                Unfortunately, they don't, so we have to use a nasty way to check for this.
-                """
-                try:
-                    msg = apps[self.app_name].deployments[self.wrapper_name].message
-                    if "Resources required for each replica:" in msg:  # No resources
-                        exhaustion_count += 1
-                    else:
-                        exhaustion_count = 0
-                    if exhaustion_count > 90:
-                        self.activation_failed = True
-                        return ModelStatus.PENDING
-                except KeyError:
-                    continue
-
             elif app_status == "DEPLOY_FAILED":
-                try:
-                    self.error_msg = (
-                        apps[self.app_name].deployments[self.wrapper_name].message
-                    )
-                    return ModelStatus.DEPLOY_FAILED
-                except:
-                    self.error_msg = "Unknown error."
-                    return ModelStatus.DEPLOY_FAILED
+                self.error_msg = deployment_msg
+                return ModelStatus.DEPLOY_FAILED
 
             elif app_status == "UNHEALTHY":
+                self.error_msg = deployment_msg
                 return ModelStatus.UNHEALTHY
+
+            elif app_status == "DEPLOYING":
+                if not check_all:
+                    replica_list: list[ReplicaDetails] = deployment_details.replicas
+                    for replica in replica_list:
+                        if replica.state == "RUNNING":
+                            # If any replica is running, the app is considered running
+                            # The other replicas are still initializing or waiting for resources
+                            self.app_handle = serve.get_app_handle(self.app_name)
+                            return ModelStatus.RUNNING
+
+                """
+                If none of the replicas are running, we use the deployment message to determine
+                whether the deployment is pending due to resource constraints and the number of
+                pending replicas.
+                Note that if Ray Serve changes the deployment message format, this code will break.
+                """
+                if "Resources required for each replica:" not in deployment_msg:
+                    return None  # Not due to resource constraints, initialization still in progress
+
+                # Use regular expression to find the number of pending replicas
+                replica_match = re.search(
+                    r"(\d+) replicas that have taken more than",
+                    deployment_msg,
+                )
+                if replica_match:
+                    self.num_pending_replicas = int(replica_match.group(1))
+                return ModelStatus.PENDING  # No resources available
+
+            else:
+                return None
+
+        except:
+            return None
+
+    async def check_deployment_status(
+        self, dashboard_port: int, check_all: bool
+    ) -> ModelStatus:
+        """
+        Note that app updates via config file are async, so we might need to wait for a while before
+        the app is actually created or updated.
+
+        If check_all is True, check all model replicas.
+        If check_all is False, return RUNNING status as long as one replica is running.
+        """
+        count_missing: int = 0
+        count_pending: int = 0
+
+        while True:
+            await asyncio.sleep(1)
+
+            status = self._check_deployment_status_once(dashboard_port, check_all)
+            if status is None:  # The model is either not started or still initializing
+                count_missing = 0
+                count_pending = 0
+                continue
+
+            if status == ModelStatus.NONEXISTENT:
+                count_missing += 1
+                if count_missing > 10:
+                    return ModelStatus.NONEXISTENT
+                continue
+            count_missing = 0
+
+            if status != ModelStatus.PENDING:
+                return status
+
+            count_pending += 1
+            if count_pending > 100:  # Pending for too long
+                return ModelStatus.PENDING

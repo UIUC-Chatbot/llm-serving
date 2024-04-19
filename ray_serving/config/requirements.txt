@@ -3,3 +3,4 @@ vllm==0.4.0
 packaging
 wheel
 flash-attn
+httpx

@@ -32,6 +32,7 @@ class Daemon:
         dump_period: int,
         gpu_check_period: int,
         health_check_period: int,
+        model_pool_update_period: int,
     ) -> None:
         while True:
             try:
@@ -66,9 +67,16 @@ class Daemon:
             )
             asyncio.create_task(self._check_service_status(health_check_period))
 
+        if model_pool_update_period > 0:
+            self._logger.info(
+                f"Updating model pool every {model_pool_update_period} seconds."
+            )
+            asyncio.create_task(self._update_model_pool(model_pool_update_period))
+
     async def _watch_gpus(self, check_period: int) -> None:
-        self._num_gpus: int = await self._main.update_num_gpus.remote()
+        self._num_gpus: int = await self._main.update_num_gpus_total.remote()
         jobID: str = "NONE"
+        nodeID = []
         while True:
             try:
                 gpus_available_in_ray: int = ray.cluster_resources().get("GPU", 0)
@@ -76,16 +84,31 @@ class Daemon:
                     self._logger.info(
                         f"LLM service has claimed {self._num_gpus} GPUs. There are {gpus_available_in_ray} GPUs available in Ray, updating service."
                     )
-                    self._num_gpus = await self._main.update_num_gpus.remote()
+                    self._num_gpus = await self._main.update_num_gpus_total.remote()
 
                 # Hardcode an autoscaler for slurm, dirty implementation, urrrgh
                 avail_gpus: int = await self._main.count_available_gpus.remote()
                 if avail_gpus < 0:
                     if jobID == "NONE":
                         self._logger.info("Needs more GPUs, scaling up.")
-                        slurm_proc = subprocess.run(
-                            ["sbatch", "config/node.sh"], text=True, capture_output=True
-                        )
+                        if len(nodeID) != 0:
+                            self._logger.info(f"Previous job failed on node {nodeID}.")
+                            nodeID_string = ",".join(nodeID)
+                            slurm_proc = subprocess.run(
+                                [
+                                    "sbatch",
+                                    f"--exclude={nodeID_string}",
+                                    "config/node.sh",
+                                ],
+                                text=True,
+                                capture_output=True,
+                            )
+                        else:
+                            slurm_proc = subprocess.run(
+                                ["sbatch", "config/node.sh"],
+                                text=True,
+                                capture_output=True,
+                            )
                         # Standard output is in the format: "Submitted batch job <JobID>"
                         output = slurm_proc.stdout.strip()
                         jobID = output.split()[-1]
@@ -93,15 +116,26 @@ class Daemon:
                     else:
                         logfile = f"ray-worker-{jobID}.log"
                         with open(logfile, "r") as file:
+                            first_line = True
                             for line in file:
+                                if first_line:
+                                    temp = line.split()[0].strip()
+                                    first_line = False
                                 if "Ray worker failed to start" in line:
-                                    self._logger.info(f"Job {jobID} failed.")
+                                    self._logger.info(
+                                        f"Job {jobID} failed on node {nodeID}."
+                                    )
                                     jobID = "NONE"
+                                    nodeID.append(temp)
                                 elif "Ray worker started successfully" in line:
-                                    self._logger.info(f"Job {jobID} succeeded.")
+                                    self._logger.info(
+                                        f"Job {jobID} succeeded on node {nodeID}."
+                                    )
                                     jobID = "NONE"
+                                    nodeID = []
                 else:
                     jobID = "NONE"
+                    nodeID = []
                 # Hardcode finished
 
             except Exception as e:
@@ -173,6 +207,14 @@ class Daemon:
 
             await asyncio.sleep(dump_period)
 
+    async def _update_model_pool(self, model_pool_update_period: int) -> None:
+        while True:
+            try:
+                await self._main.update_model_pool.remote()
+            except Exception as e:
+                self._logger.error(f"Error when updating model pool: {e}")
+            await asyncio.sleep(model_pool_update_period)
+
 
 class _DaemonArgs(BaseModel):
     main: str
@@ -180,6 +222,7 @@ class _DaemonArgs(BaseModel):
     dump_period: int  # time period between config file dumps, in seconds
     gpu_check_period: int  # time period between GPU checks, in seconds
     health_check_period: int  # time period between health checks, in seconds
+    model_pool_update_period: int  # time period between model pool updates, in seconds
 
 
 def app_builder(args: _DaemonArgs) -> Application:
@@ -189,4 +232,5 @@ def app_builder(args: _DaemonArgs) -> Application:
         args.dump_period,
         args.gpu_check_period,
         args.health_check_period,
+        args.model_pool_update_period,
     )

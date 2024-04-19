@@ -19,30 +19,44 @@ fastapi endpoints.
 """
 
 
-class _AdminGetModelReq(BaseModel):
+class AdminGetModelReq(BaseModel):
     key: str
     model_name: str
     model_type: str
+    num_replicas: int
     gpus_per_replica: int
+    priority: int
     hf_key: str | None = None
-    force_load: bool = False
 
 
-class _AdminDelModelReq(BaseModel):
+class AdminDelModelReq(BaseModel):
     key: str
     model_name: str
 
 
-class _AdminReq(BaseModel):
+class AdminReq(BaseModel):
     key: str
 
 
-class _AdminModelRefReq(BaseModel):
+class AdminLoadModelReq(BaseModel):
+    key: str
+    model_name: str
+    num_replicas: int
+
+
+class AdminModelRefReq(BaseModel):
     key: str
     model_reference_path: str
 
 
-class _hfEmbeddingReq(BaseModel):
+class TestReq(BaseModel):
+    model: str
+    num_replicas: int = 1
+    gpus_per_replica: int = 1
+    priority: int = 0
+
+
+class hfEmbeddingReq(BaseModel):
     model: str
     model_config = ConfigDict(extra="allow")
 
@@ -64,12 +78,12 @@ class MainApp(ModelController):
 
     def __init__(
         self,
+        autoscaler_enabled: bool,
         config_file_path: str,
         dashboard_port: int,
-        has_autoscaler: bool,
         model_reference_path: str | None,
     ) -> None:
-        super().__init__(config_file_path, dashboard_port, has_autoscaler)
+        super().__init__(autoscaler_enabled, config_file_path, dashboard_port)
         if model_reference_path is not None:
             self.load_model_reference(model_reference_path)
         else:
@@ -109,9 +123,11 @@ class MainApp(ModelController):
                 "model_name": model.model_name,
                 "model_type": str(model.model_type),
                 "status": status,
+                "num_replicas": model.num_active_replicas,
                 "priority": model.priority,
-                "route_prefix": model.route_prefix,
                 "gpus_per_replica": model.gpus_per_replica,
+                "route_prefix": model.route_prefix,
+                "created_time": model.created_time,
             }
             if model.num_active_replicas > 0:
                 hot_models.append(model_info)
@@ -131,7 +147,7 @@ class MainApp(ModelController):
         return key == "IloveRocknRoll"
 
     @main_app.post("/admin/get_model")
-    async def admin_get_model(self, request: _AdminGetModelReq) -> JSONResponse:
+    async def admin_get_model(self, request: AdminGetModelReq) -> JSONResponse:
         if not self._verify_key(request.key):
             return JSONResponse(status_code=403, content="Permission denied. Aborting.")
 
@@ -148,24 +164,16 @@ class MainApp(ModelController):
                 status_code=400, content="Invalid model type. Aborting."
             )
 
-        if request.model_name in self._model_reference:
-            priority: int = self._model_reference[request.model_name]["priority"]
-            gpus_per_replica: int = self._model_reference[request.model_name][
-                "gpus_per_replica"
-            ]
-        else:
-            priority: int = 0
-            gpus_per_replica: int = request.gpus_per_replica
-
         model = await self.get_or_register_model(
             model_name=request.model_name,
             model_type=model_type,
-            priority=priority,
-            gpus_per_replica=gpus_per_replica,
+            num_replicas=request.num_replicas,
+            gpus_per_replica=request.gpus_per_replica,
+            priority=request.priority,
             hf_key=request.hf_key,
-            force_load=request.force_load,
         )
-        if model is not None:
+
+        if isinstance(model, ModelContext):
             return JSONResponse(
                 status_code=200,
                 content=f"Model {model.model_name} endpoint: {model.route_prefix}",
@@ -173,11 +181,11 @@ class MainApp(ModelController):
         else:
             return JSONResponse(
                 status_code=503,
-                content=f"Model {request.model_name} initialization failed",
+                content=f"Model {request.model_name} initialization failed:\n{model}",
             )
 
     @main_app.post("/admin/delete_model")
-    async def admin_delete_model(self, request: _AdminDelModelReq) -> JSONResponse:
+    async def admin_delete_model(self, request: AdminDelModelReq) -> JSONResponse:
         if not self._verify_key(request.key):
             return JSONResponse(status_code=403, content="Permission denied. Aborting.")
 
@@ -192,27 +200,34 @@ class MainApp(ModelController):
             )
 
     @main_app.post("/admin/reset")
-    async def admin_reset(self, request: _AdminReq) -> JSONResponse:
+    async def admin_reset(self, request: AdminReq) -> JSONResponse:
         if not self._verify_key(request.key):
             return JSONResponse(status_code=403, content="Permission denied. Aborting.")
         await self.reset_all()
         return JSONResponse(status_code=200, content="LLM service reset.")
 
+    @main_app.post("/admin/load_model")
+    async def admin_load_model(self, request: AdminLoadModelReq) -> JSONResponse:
+        if not self._verify_key(request.key):
+            return JSONResponse(status_code=403, content="Permission denied. Aborting.")
+        res = await self.load_model(request.model_name, request.num_replicas)
+        return JSONResponse(status_code=200, content=res)
+
     @main_app.post("/admin/info")
-    async def admin_info(self, request: _AdminReq) -> JSONResponse:
+    async def admin_info(self, request: AdminReq) -> JSONResponse:
         if not self._verify_key(request.key):
             return JSONResponse(status_code=403, content="Permission denied. Aborting.")
         service_info: dict = {
-            "has_autoscaler": self._has_autoscaler,
-            "last_autoscaler_exhaustion_time": self._last_exhaustion_time,
-            "num_total_gpus": self._num_gpus,
+            "autoscaler_enabled": self._autoscaler_enabled,
+            "last_autoscaler_failed_time": self._autoscaler_last_failed_time,
+            "num_total_gpus": self._num_gpus_total,
             "num_available_gpus:": self.count_available_gpus(),
             "num_served_models": self._num_served_models,
         }
         return JSONResponse(status_code=200, content=service_info)
 
     @main_app.post("/admin/dump_config")
-    async def admin_dump_config(self, request: _AdminReq) -> JSONResponse:
+    async def admin_dump_config(self, request: AdminReq) -> JSONResponse:
         if not self._verify_key(request.key):
             return JSONResponse(status_code=403, content="Permission denied. Aborting.")
         config_file = self.get_current_config()
@@ -220,7 +235,7 @@ class MainApp(ModelController):
 
     @main_app.post("/admin/load_model_reference")
     async def admin_load_model_reference(
-        self, request: _AdminModelRefReq
+        self, request: AdminModelRefReq
     ) -> JSONResponse:
         if not self._verify_key(request.key):
             return JSONResponse(status_code=403, content="Permission denied. Aborting.")
@@ -245,6 +260,25 @@ class MainApp(ModelController):
             except Exception as e:
                 raise e
         return JSONResponse(content="Service Temporarily Unavailable", status_code=503)
+
+    """
+    Test API endpoints
+    """
+
+    @main_app.post("/test")
+    async def test_endpoint(self, request: TestReq):
+        model = await self.get_or_register_model(
+            model_name=request.model,
+            model_type=ModelType.EMPTY,
+            num_replicas=request.num_replicas,
+            gpus_per_replica=request.gpus_per_replica,
+            priority=request.priority,
+        )
+        if isinstance(model, str):
+            return JSONResponse(content=model, status_code=400)
+
+        res = await model.app_handle.call.remote(request)
+        return JSONResponse(content=res)
 
     """
     OpenAI API endpoints
@@ -326,12 +360,13 @@ class MainApp(ModelController):
             model = await self.get_or_register_model(
                 model_name=request.model,
                 model_type=ModelType.VLLM_OPENAI,
-                priority=priority,
+                num_replicas=1,
                 gpus_per_replica=gpus_per_replica,
+                priority=priority,
                 hf_key=hf_key,
             )
-            if model is None:
-                return JSONResponse(content="Model is not supported.", status_code=400)
+            if isinstance(model, str):
+                return JSONResponse(content=model, status_code=400)
 
             if request.stream:
                 return await create_stream_request(model)
@@ -346,7 +381,7 @@ class MainApp(ModelController):
 
     @main_app.post("/hf_embed/{full_path:path}")
     async def create_hf_embedding(
-        self, full_path: str, request: _hfEmbeddingReq, raw_request: Request
+        self, full_path: str, request: hfEmbeddingReq, raw_request: Request
     ) -> JSONResponse:
 
         async def main_func():
@@ -368,12 +403,13 @@ class MainApp(ModelController):
             model = await self.get_or_register_model(
                 model_name=request.model,
                 model_type=ModelType.EMBEDDING,
-                priority=priority,
+                num_replicas=1,
                 gpus_per_replica=1,  # Assume embedding model uses 1 GPU only
+                priority=priority,
                 hf_key=hf_key,
             )
-            if model is None:
-                return JSONResponse(content="Model is not supported.", status_code=400)
+            if isinstance(model, str):
+                return JSONResponse(content=model, status_code=400)
 
             is_success, response = await model.app_handle.create_request.remote(
                 request, raw_request.method, full_path
@@ -388,16 +424,16 @@ class MainApp(ModelController):
 
 
 class _MainArgs(BaseModel):
+    autoscaler_enabled: bool
     config_file_path: str
     dashboard_port: int
-    has_autoscaler: bool = False
     model_reference_path: str | None = None
 
 
 def app_builder(args: _MainArgs) -> Application:
     return MainApp.bind(
+        args.autoscaler_enabled,
         args.config_file_path,
         args.dashboard_port,
-        args.has_autoscaler,
         args.model_reference_path,
     )
