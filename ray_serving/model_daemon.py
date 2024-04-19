@@ -69,6 +69,7 @@ class Daemon:
     async def _watch_gpus(self, check_period: int) -> None:
         self._num_gpus: int = await self._main.update_num_gpus.remote()
         jobID: str = "NONE"
+        nodeID: str = "NONE"
         while True:
             try:
                 gpus_available_in_ray: int = ray.cluster_resources().get("GPU", 0)
@@ -83,9 +84,19 @@ class Daemon:
                 if avail_gpus < 0:
                     if jobID == "NONE":
                         self._logger.info("Needs more GPUs, scaling up.")
-                        slurm_proc = subprocess.run(
-                            ["sbatch", "config/node.sh"], text=True, capture_output=True
-                        )
+                        if nodeID != "NONE":
+                            self._logger.info(f"Previous job failed on node {nodeID}.")
+                            slurm_proc = subprocess.run(
+                                ["sbatch", f"--exclude={nodeID}", "config/node.sh"],
+                                text=True,
+                                capture_output=True,
+                            )
+                        else:
+                            slurm_proc = subprocess.run(
+                                ["sbatch", "config/node.sh"],
+                                text=True,
+                                capture_output=True,
+                            )
                         # Standard output is in the format: "Submitted batch job <JobID>"
                         output = slurm_proc.stdout.strip()
                         jobID = output.split()[-1]
@@ -93,15 +104,25 @@ class Daemon:
                     else:
                         logfile = f"ray-worker-{jobID}.log"
                         with open(logfile, "r") as file:
+                            first_line = True
                             for line in file:
+                                if first_line:
+                                    nodeID = line.split()[0].strip()
+                                    first_line = False
                                 if "Ray worker failed to start" in line:
-                                    self._logger.info(f"Job {jobID} failed.")
+                                    self._logger.info(
+                                        f"Job {jobID} failed on node {nodeID}."
+                                    )
                                     jobID = "NONE"
                                 elif "Ray worker started successfully" in line:
-                                    self._logger.info(f"Job {jobID} succeeded.")
+                                    self._logger.info(
+                                        f"Job {jobID} succeeded on node {nodeID}."
+                                    )
                                     jobID = "NONE"
+                                    nodeID = "NONE"
                 else:
                     jobID = "NONE"
+                    nodeID = "NONE"
                 # Hardcode finished
 
             except Exception as e:

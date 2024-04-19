@@ -7,6 +7,7 @@
 #SBATCH --time=01:00:00                 # Time limit hrs:min:sec
 #SBATCH --output=ray-worker-%j.log      # Standard output and error log
 
+echo "$SLURMD_NODENAME"
 ray start --address='10.10.109.243:6379' # Command to run
 
 if [ $? -eq 0 ]; then
