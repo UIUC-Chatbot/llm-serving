@@ -129,9 +129,7 @@ class ModelContext:
                             return ModelStatus.RUNNING
 
                 """
-                If none of the replicas are running, we use the deployment message to determine
-                whether the deployment is pending due to resource constraints and the number of
-                pending replicas.
+                We use the deployment message to determine whether the deployment is pending due to resource constraints and the number of pending replicas.
                 Note that if Ray Serve changes the deployment message format, this code will break.
                 """
                 if "Resources required for each replica:" not in deployment_msg:

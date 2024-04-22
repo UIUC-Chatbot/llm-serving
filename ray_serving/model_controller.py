@@ -137,7 +137,7 @@ class ModelController:
             # Some replicas have been waiting for resources for too long, downscale the model.
             async with self._lock:
                 self._logger.warning(
-                    f"App {model.app_name} has {model.num_pending_replicas} replicas that havebeen pending due to resource exhaustion, downscaling the model."
+                    f"App {model.app_name} has {model.num_pending_replicas} replicas that have been pending due to resource exhaustion, downscaling the model."
                 )
                 self._autoscaler_last_failed_gpus = model.gpus_per_replica
                 self._autoscaler_last_failed_time = time.time()
