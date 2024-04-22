@@ -146,7 +146,6 @@ class ModelController:
                     model.num_active_replicas - model.num_pending_replicas
                 )
                 self._set_num_replicas_for_one_model(model, new_num_active_replicas)
-                # The model has just been updated, continue checking its deployment status.
 
     async def _validate_deployment(self, model: ModelContext) -> bool:
         """
