@@ -1,25 +1,31 @@
 # type: ignore
+from http import HTTPStatus
+
 import fastapi
 from fastapi import Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response, StreamingResponse
-from http import HTTPStatus
-
-from logging import getLogger, Logger
-from model_app import ModelAppInterface, ModelAppArgs
-from ray import serve
-import time
-from typing import AsyncGenerator
+from prometheus_client import make_asgi_app
 
 import vllm
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.entrypoints.openai.cli_args import make_arg_parser
-from vllm.entrypoints.openai.protocol import ChatCompletionRequest, ErrorResponse
-
+from vllm.entrypoints.openai.protocol import (
+    ChatCompletionRequest,
+    ChatCompletionResponse,
+    ErrorResponse,
+)
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
 from vllm.usage.usage_lib import UsageContext
+
+from logging import getLogger, Logger
+from model_app import ModelAppInterface, ModelAppArgs
+from ray import serve
+from ray.serve.exceptions import RayServeException
+import time
+from typing import AsyncGenerator
 
 
 def parse_args(model_name: str, gpus_per_replica: int):
@@ -42,18 +48,18 @@ def parse_args(model_name: str, gpus_per_replica: int):
     )
 
 
-app = fastapi.FastAPI()
-
-
 class _FakeRequest:
     """
     VLLM OpenAI server uses starlette raw request object, which is not serializable. We need to
     create a fake request object, which is serializable, to pass to the model.
-    As of vllm 0.4.0, they only uses is_disconnected() function.
+    As of vllm 0.4.1, they only uses is_disconnected() function.
     """
 
     async def is_disconnected(self):
         return False
+
+
+app = fastapi.FastAPI()
 
 
 @serve.deployment(name="ModelApp")
@@ -64,17 +70,22 @@ class ModelApp(ModelAppInterface):
         self._args = parse_args(model_name, gpus_per_replica)
         self._logger: Logger = getLogger("ray.serve")
 
+        # Add prometheus asgi middleware to route /metrics requests
+        metrics_app = make_asgi_app()
+        app.mount("/metrics", metrics_app)
+
         self._logger.info(f"vLLM API server version {vllm.__version__}")
         self._logger.info(f"args: {self._args}")
 
         if self._args.served_model_name is not None:
-            self._served_model = self._args.served_model_name
+            self._served_model_names = self._args.served_model_name
         else:
-            self._served_model = self._args.model
+            self._served_model_names = [self._args.model]
 
-        # LLM-serving related fields
+        # LLM-serving related variables
         self._is_active: bool = False
         self._main = serve.get_app_handle(main)
+        self._model_name = model_name
         self._last_served_time: float = time.time()
 
     def reconfigure(self, config) -> None:
@@ -82,23 +93,23 @@ class ModelApp(ModelAppInterface):
         This method is called when the model is being reconfigured via "user_config" in the config yaml file. Refer to Ray documentation for more details.
         """
         self._is_active: bool = config["is_active"]
-        if self._is_active:
-            engine_args = AsyncEngineArgs.from_cli_args(self._args)
-            engine = AsyncLLMEngine.from_engine_args(
-                engine_args, usage_context=UsageContext.OPENAI_API_SERVER
-            )
-            self.openai_serving_chat: OpenAIServingChat = OpenAIServingChat(
-                engine,
-                self._served_model,
-                self._args.response_role,
-                self._args.lora_modules,
-                self._args.chat_template,
-            )
-            self.openai_serving_completion: OpenAIServingCompletion = (
-                OpenAIServingCompletion(
-                    engine, self._served_model, self._args.lora_modules
-                )
-            )
+        if not self._is_active:
+            return  # Do nothing if the model is not active
+
+        engine_args = AsyncEngineArgs.from_cli_args(self._args)
+        engine = AsyncLLMEngine.from_engine_args(
+            engine_args, usage_context=UsageContext.OPENAI_API_SERVER
+        )
+        self.openai_serving_chat = OpenAIServingChat(
+            engine,
+            self._served_model_names,
+            self._args.response_role,
+            self._args.lora_modules,
+            self._args.chat_template,
+        )
+        self.openai_serving_completion = OpenAIServingCompletion(
+            engine, self._served_model_names, self._args.lora_modules
+        )
 
     def collect_eviction_defense_metrics(self) -> dict:
         """
@@ -107,11 +118,12 @@ class ModelApp(ModelAppInterface):
         return {"last_served_time": self._last_served_time}
 
     async def _check_model_availability(self) -> bool:
+        self._last_served_time = time.time()
         if self._is_active:
-            self._last_served_time = time.time()
             return True
-        await self._main.load_model.remote(self._served_model, 1)
-        return False
+        else:
+            await self._main.load_model.remote(self._model_name, 1)
+            return False
 
     @app.exception_handler(RequestValidationError)
     async def validation_exception_handler(self, _, exc):
@@ -146,6 +158,7 @@ class ModelApp(ModelAppInterface):
         generator = await self.openai_serving_chat.create_chat_completion(
             request, raw_request
         )
+
         if isinstance(generator, ErrorResponse):
             return JSONResponse(
                 content=generator.model_dump(), status_code=generator.code
@@ -154,9 +167,10 @@ class ModelApp(ModelAppInterface):
         if request.stream:
             return StreamingResponse(content=generator, media_type="text/event-stream")
         else:
+            assert isinstance(generator, ChatCompletionResponse)
             return JSONResponse(content=generator.model_dump())
 
-    async def create_chat_completion_batch(
+    async def create_internal_chat_completion_batch(
         self, request: ChatCompletionRequest
     ) -> tuple[bool, dict] | tuple[bool, None]:
         """
@@ -170,9 +184,16 @@ class ModelApp(ModelAppInterface):
         response = await self.openai_serving_chat.create_chat_completion(
             request, _FakeRequest()
         )
+
+        if isinstance(response, ErrorResponse):
+            return False, response.model_dump()
+
+        if isinstance(response, AsyncGenerator):
+            return False, None
+
         return True, response.model_dump()
 
-    async def create_chat_completion_stream(
+    async def create_internal_chat_completion_stream(
         self, request: ChatCompletionRequest
     ) -> AsyncGenerator:
         """
@@ -194,6 +215,16 @@ class ModelApp(ModelAppInterface):
         response = await self.openai_serving_chat.create_chat_completion(
             request, _FakeRequest()
         )
+
+        if isinstance(response, ErrorResponse):
+            # Raise an exception to be caught by the controller, which then sends the error response
+            raise RayServeException(response.model_dump())
+
+        if isinstance(response, ChatCompletionResponse):
+            raise RayServeException(
+                "Unexpected response type, should be an async generator, but got a ChatCompletionResponse."
+            )
+
         async for chunk in response:
             yield chunk
 

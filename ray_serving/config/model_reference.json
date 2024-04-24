@@ -30,5 +30,9 @@
     "mistral-community/Mixtral-8x22B-v0.1": {
         "gpus_per_replica": 8,
         "priority": 0
+    },
+    "meta-llama/Meta-Llama-3-70B-Instruct": {
+        "gpus_per_replica": 2,
+        "priority": 0
     }
 }

@@ -111,7 +111,7 @@ class MainApp(ModelController):
     @main_app.get("/models")
     def list_models(self) -> JSONResponse:
         hot_models = []
-        cold_models = []
+        cached_models = []
         for model in self._model_pool.values():
             if model.num_active_replicas == 0:
                 continue
@@ -137,7 +137,7 @@ class MainApp(ModelController):
 
         hf_cache_info = scan_cache_dir()
         for repo in hf_cache_info.repos:
-            cold_models.append(
+            cached_models.append(
                 {
                     "model-name": repo.repo_id,
                     "model-size": repo.size_on_disk_str,
@@ -147,7 +147,7 @@ class MainApp(ModelController):
 
         return JSONResponse(
             status_code=200,
-            content={"hot_models": hot_models, "cold_models": cold_models},
+            content={"hot_models": hot_models, "cached_models": cached_models},
         )
 
     """
@@ -289,8 +289,13 @@ class MainApp(ModelController):
         while retry_count < num_retries:
             try:
                 return await func()
-            except RayServeException:
+            except RayServeException as e:
                 retry_count += 1
+                if retry_count == num_retries:
+                    return JSONResponse(
+                        status_code=503,
+                        content={"error": str(e)},
+                    )
                 await asyncio.sleep(0.1)
             except Exception as e:
                 raise e
@@ -342,12 +347,20 @@ class MainApp(ModelController):
         async def create_batch_request(model: ModelContext) -> JSONResponse:
             is_success, response = await model.app_handle.options(
                 stream=False
-            ).create_chat_completion_batch.remote(request)
+            ).create_internal_chat_completion_batch.remote(request)
 
             if is_success:
                 return JSONResponse(content=response)
             else:
-                raise RayServeException("Model Not Available")
+                if response is not None:
+                    return JSONResponse(content=response, status_code=500)
+                else:
+                    return JSONResponse(
+                        content={
+                            "message": "Sorry, something went wrong on our end. Please contact us."
+                        },
+                        status_code=500,
+                    )
 
         async def create_stream_request(model: ModelContext) -> StreamingResponse:
 
@@ -358,11 +371,13 @@ class MainApp(ModelController):
 
             generator = model.app_handle.options(
                 stream=True
-            ).create_chat_completion_stream.remote(request)
+            ).create_internal_chat_completion_stream.remote(request)
 
             try:  # If the model is not available yet, it would return an empty generator
                 first_item = await anext(generator)
-            except:
+            except RayServeException as e:
+                raise  # Something went wrong in the model, propagate the error
+            except:  # Empty generator
                 raise RayServeException("Model Not Available")
 
             # Since we have already consumed the first item, we need to put it back
@@ -414,7 +429,7 @@ class MainApp(ModelController):
     Huggingface Embedding API endpoints
     """
 
-    @main_app.post("/hf_embed/{full_path:path}")
+    @main_app.post("/v1/{full_path:path}")
     async def create_hf_embedding(
         self, full_path: str, request: hfEmbeddingReq, raw_request: Request
     ) -> JSONResponse:
