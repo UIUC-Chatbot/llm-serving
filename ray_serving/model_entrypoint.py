@@ -1,6 +1,7 @@
 import asyncio
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse, Response
+from huggingface_hub import scan_cache_dir
 import json
 from pydantic import BaseModel, ConfigDict
 from ray import serve
@@ -112,6 +113,9 @@ class MainApp(ModelController):
         hot_models = []
         cold_models = []
         for model in self._model_pool.values():
+            if model.num_active_replicas == 0:
+                continue
+
             if model.is_deployment_success is None:
                 status = "Deploying"
             elif model.is_deployment_success:
@@ -129,10 +133,18 @@ class MainApp(ModelController):
                 "route_prefix": model.route_prefix,
                 "created_time": model.created_time,
             }
-            if model.num_active_replicas > 0:
-                hot_models.append(model_info)
-            else:
-                cold_models.append(model_info)
+            hot_models.append(model_info)
+
+        hf_cache_info = scan_cache_dir()
+        for repo in hf_cache_info.repos:
+            cold_models.append(
+                {
+                    "model-name": repo.repo_id,
+                    "model-size": repo.size_on_disk_str,
+                    "last-modified-time": repo.last_modified_str,
+                }
+            )
+
         return JSONResponse(
             status_code=200,
             content={"hot_models": hot_models, "cold_models": cold_models},
@@ -148,6 +160,9 @@ class MainApp(ModelController):
 
     @main_app.post("/admin/get_model")
     async def admin_get_model(self, request: AdminGetModelReq) -> JSONResponse:
+        """
+        Get or register a model. Return the route prefix if successful.
+        """
         if not self._verify_key(request.key):
             return JSONResponse(status_code=403, content="Permission denied. Aborting.")
 
@@ -186,6 +201,9 @@ class MainApp(ModelController):
 
     @main_app.post("/admin/delete_model")
     async def admin_delete_model(self, request: AdminDelModelReq) -> JSONResponse:
+        """
+        Delete a model.
+        """
         if not self._verify_key(request.key):
             return JSONResponse(status_code=403, content="Permission denied. Aborting.")
 
@@ -201,6 +219,9 @@ class MainApp(ModelController):
 
     @main_app.post("/admin/reset")
     async def admin_reset(self, request: AdminReq) -> JSONResponse:
+        """
+        Reset the LLM service.
+        """
         if not self._verify_key(request.key):
             return JSONResponse(status_code=403, content="Permission denied. Aborting.")
         await self.reset_all()
@@ -208,6 +229,10 @@ class MainApp(ModelController):
 
     @main_app.post("/admin/load_model")
     async def admin_load_model(self, request: AdminLoadModelReq) -> JSONResponse:
+        """
+        The system does its best to load the model with the requested number of replicas. But there
+        is no guarantee that the system can load the model with the exact number of replicas.
+        """
         if not self._verify_key(request.key):
             return JSONResponse(status_code=403, content="Permission denied. Aborting.")
         res = await self.load_model(request.model_name, request.num_replicas)
@@ -215,6 +240,9 @@ class MainApp(ModelController):
 
     @main_app.post("/admin/info")
     async def admin_info(self, request: AdminReq) -> JSONResponse:
+        """
+        Return the service information.
+        """
         if not self._verify_key(request.key):
             return JSONResponse(status_code=403, content="Permission denied. Aborting.")
         service_info: dict = {
@@ -228,6 +256,9 @@ class MainApp(ModelController):
 
     @main_app.post("/admin/dump_config")
     async def admin_dump_config(self, request: AdminReq) -> JSONResponse:
+        """
+        Dump the current Ray Serve config file.
+        """
         if not self._verify_key(request.key):
             return JSONResponse(status_code=403, content="Permission denied. Aborting.")
         config_file = self.get_current_config()
@@ -237,6 +268,10 @@ class MainApp(ModelController):
     async def admin_load_model_reference(
         self, request: AdminModelRefReq
     ) -> JSONResponse:
+        """
+        Load the model reference file, which contains important information about the models, such
+        as the number of GPUs required for each model and priority.
+        """
         if not self._verify_key(request.key):
             return JSONResponse(status_code=403, content="Permission denied. Aborting.")
         model_reference_path = request.model_reference_path
@@ -355,7 +390,7 @@ class MainApp(ModelController):
                 if token.startswith("hf_"):
                     hf_key = token
                 else:
-                    self._logger.info("Received invalid huggingface key.")
+                    self._logger.debug("Received invalid huggingface key.")
 
             model = await self.get_or_register_model(
                 model_name=request.model,
@@ -398,7 +433,7 @@ class MainApp(ModelController):
                 if token.startswith("hf_"):
                     hf_key = token
                 else:
-                    self._logger.info("Received invalid huggingface key.")
+                    self._logger.debug("Received invalid huggingface key.")
 
             model = await self.get_or_register_model(
                 model_name=request.model,

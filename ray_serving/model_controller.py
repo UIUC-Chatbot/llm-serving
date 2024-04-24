@@ -478,7 +478,7 @@ class ModelController:
                     or time.time() - self._autoscaler_last_failed_time > 300
                 ):
                     self._logger.info(
-                        f"Trying to set model {model_name} active replicas to {num_replicas} even if there are no available GPUs."
+                        f"Set model {model_name} active replicas to {num_replicas} even if there are no available GPUs."
                     )
                     self._set_num_replicas_for_one_model(model, num_replicas)
                     return f"Model {model_name} active replicas set to {num_replicas}."
