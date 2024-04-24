@@ -378,7 +378,7 @@ class MainApp(ModelController):
             except RayServeException as e:
                 raise  # Something went wrong in the model, propagate the error
             except:  # Empty generator
-                raise RayServeException("Model Not Available")
+                raise RayServeException("Service Temporarily Unavailable")
 
             # Since we have already consumed the first item, we need to put it back
             valid_generator = put_first_back(generator, first_item)
@@ -468,7 +468,7 @@ class MainApp(ModelController):
             if is_success:
                 return JSONResponse(content=response)
             else:
-                raise RayServeException("Model Not Available")
+                raise RayServeException("Service Temporarily Unavailable")
 
         return await self._retry_func(main_func, 2)
 
