@@ -228,7 +228,7 @@ class ConfigWriter:
 
         self.apply_config()
         self._logger.info(
-            f"App: {model.app_name} added, number of active replicas set to {model.num_active_replicas}."
+            f"App: {model.app_name} added, type: {model.model_type}, number of active replicas set to {model.num_active_replicas}."
         )
 
     def remove_app(self, model: ModelContext) -> None:
