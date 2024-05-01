@@ -16,6 +16,20 @@
     - Users can send requests using OpenAI api.
     - Administrators can directly manage the model pool by using **admin_client**.
 
+## Admin API
+For loading and unloading models. 
+See the Swaggar docs here: https://api.ncsa.ai/llm/docs
+
+Higher priority models will evict lower priority models, in case where autoscaler is disabled. Otherwise, we will always try to scale the Ray cluster (to gain more GPU memory) and launch the new model there. However, if the autoscaler failes (maybe unavailable resources), then higher priority models will evict lower priority models.
+
+The default keep-hot time is 10 minutes, after which the model instance will be shut down due to being idle.
+
+* Priority `0` is lowest and default, positive numbers are higher.
+* Priority `>=2` the model will always stay hot, never removed.
+* All models, regardless of priority, will always be removed in the evening (CST), to save money. Defined in `clean_unpopular_models()` function.
+
+Note: models that require multiple GPUs must be specified in the config file, otherwise 1 GPU is used by default. TODO: make this dynamic.
+
 ## Model Reference File
 
 Some models are extremely large and cannot fit into a single GPU. We maintain a reference file which contains the model name and the number of GPUs required to serve the model.
