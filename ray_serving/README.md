@@ -28,7 +28,7 @@ The default keep-hot time is 10 minutes, after which the model instance will be 
 * Priority `>=2` the model will always stay hot, never removed.
 * All models, regardless of priority, will always be removed in the evening (CST), to save money. Defined in `clean_unpopular_models()` function.
 
-Note: models that require multiple GPUs must be specified in the config file, otherwise 1 GPU is used by default. TODO: make this dynamic.
+Note: models that require multiple GPUs must be specified in the `model_reference.json` file, otherwise 1 GPU is used by default. Eventually we will make this dynamic.
 
 ## Model Reference File
 
