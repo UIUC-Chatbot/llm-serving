@@ -87,6 +87,8 @@ class Daemon:
                     self._num_gpus = await self._main.update_num_gpus_total.remote()
 
                 # Hardcode an autoscaler for slurm, dirty implementation, urrrgh
+                # NOTE: This is hard-coded to work with Hydro server. Will not work on any other server. 
+                # Get @Tingkai to fix his autoscaler implementation.
                 avail_gpus: int = await self._main.count_available_gpus.remote()
                 if avail_gpus < 0:
                     if jobID == "NONE":
