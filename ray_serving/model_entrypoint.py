@@ -388,6 +388,7 @@ class MainApp(ModelController):
             )
 
         async def main_func():
+            # NOTE: Make dynamic the number of GPUs required. Have to asses GPU mem-capacity AND assess model memory requirements.
             if request.model in self._model_reference:
                 priority: int = self._model_reference[request.model]["priority"]
                 gpus_per_replica: int = self._model_reference[request.model][
