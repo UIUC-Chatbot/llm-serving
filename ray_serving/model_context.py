@@ -183,5 +183,5 @@ class ModelContext:
                 return status
 
             count_pending += 1
-            if count_pending > 100:  # Pending for too long
+            if count_pending > 180:  # Pending for too long
                 return ModelStatus.PENDING

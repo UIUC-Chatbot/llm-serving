@@ -74,8 +74,8 @@ class ModelApp(ModelAppInterface):
         metrics_app = make_asgi_app()
         app.mount("/metrics", metrics_app)
 
-        self._logger.info(f"vLLM API server version {vllm.__version__}")
-        self._logger.info(f"args: {self._args}")
+        self._logger.info("vLLM API server version %s", vllm.__version__)
+        self._logger.info("args: %s", self._args)
 
         if self._args.served_model_name is not None:
             self._served_model_names = self._args.served_model_name

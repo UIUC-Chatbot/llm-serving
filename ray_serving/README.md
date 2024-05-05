@@ -2,7 +2,8 @@
 
 ## Usage
 
-1. Install Ray and Ray Serve. `pip install -r config/requirements.txt`.
+1. Install Ray and Ray Serve. `pip install -r config/requirements.txt`.  
+If you want to use [Flash Attention](https://github.com/Dao-AILab/flash-attention), then run `pip install -U flash-attn --no-build-isolation`.
 1. Navigate to **/ray_serving/**.
 1. Start Ray cluster, e.g. `ray start --head --disable-usage-stats --resources='{"head_agents": 2}' --num-gpus=$(GPU_COUNT) --temp-dir=$(TMP_DIR) --dashboard-port=$(PORT)`.  
     - `head_agent` is a custom resource that is used to force some important processes to be deployed on the head node.

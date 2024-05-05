@@ -202,14 +202,10 @@ class ModelController:
                     self._autoscaler_last_failed_gpus = model.gpus_per_replica
                     self._autoscaler_last_failed_time = time.time()
 
-                    # Downscale the model to 0 replicas
+                    # Downscale the model
                     new_num_active_replicas = (
                         model.num_active_replicas - model.num_pending_replicas
                     )
-                    if new_num_active_replicas != 0:
-                        self._logger.warning(
-                            f"Model {model.model_name} should be downscaled to 0 replicas, but now to {new_num_active_replicas}."
-                        )
                     self._set_num_replicas_for_one_model(model, new_num_active_replicas)
                     # The model has just been updated, continue checking its deployment status.
 
